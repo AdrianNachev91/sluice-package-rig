@@ -20,4 +20,24 @@ Decode only, and dynamically linked. Sluice reads HEIC and AVIF and writes neith
 built. Shipping the shared library beside the tool is what lets somebody replace it, which is what
 its LGPL licence is for.
 
+Each archive holds `heif-dec`, the `heif-convert` name Sluice invokes, five shared libraries and
+five licence texts. Nothing a compiler would read.
+
+## Running the build
+
+It runs on request, never on a push, because its output only changes when a library version does.
+
+```
+gh workflow run build-libheif.yml --repo AdrianNachev91/sluice-package-rig --ref main \
+  -f machines=all -f publish=true
+```
+
+While a toolchain is being fixed, name just that machine instead: `-f machines=windows.amd64`, or
+several comma separated. Each one stops at its own point for its own reason, so a full run mostly
+re-proves what already worked and buries the answer being waited on.
+
+Publishing is refused unless the run built everything. A release missing an archive would fail
+Sluice's packaging build on a download error rather than on anything naming the machine that was
+never built.
+
 Nothing here is meant for end users. If you are looking for Sluice itself, follow the link above.
