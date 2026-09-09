@@ -24,10 +24,13 @@ on:
         description: libheif tag to build, without the leading v
         required: true
         default: 1.23.4
+      # 1.1.2 rather than the 1.0.x line, because that one declares a cmake_minimum_required below
+      # 3.5 and CMake 4 removed support for it. The runner images that ship CMake 4 refuse to
+      # configure it at all. 1.1.2 declares 3.16.3.
       libde265_version:
         description: libde265 tag, the HEVC decoder HEIC needs
         required: true
-        default: 1.0.15
+        default: 1.1.2
       dav1d_version:
         description: dav1d tag, the AV1 decoder AVIF needs
         required: true
@@ -81,6 +84,25 @@ jobs:
       - name: Install meson and ninja
         run: pip install meson ninja
 
+      # dav1d assembles its x86 paths with nasm and no runner image carries it. Without it meson
+      # stops at "Program 'nasm' not found" rather than falling back to C. Apple silicon assembles
+      # its own aarch64 paths with the system toolchain and wants nothing extra.
+      - name: Install nasm
+        if: ${{ matrix.machine != 'mac.aarch64' }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.machine }}" in
+            linux.*)   sudo apt-get update && sudo apt-get install -y nasm ;;
+            mac.*)     brew install nasm ;;
+            windows.*) choco install nasm -y --no-progress
+                       # Found rather than guessed. The package's install directory is chocolatey's
+                       # to change, and a wrong guess here surfaces later as meson reporting no
+                       # nasm, which names the wrong cause.
+                       NASM_DIR=$(dirname "$(find "/c/Program Files" "/c/Program Files (x86)" -maxdepth 2 -name nasm.exe -print -quit)")
+                       echo "found nasm in $NASM_DIR"
+                       echo "$NASM_DIR" >> "$GITHUB_PATH" ;;
+          esac
+
       - name: Fetch the sources
         run: |
           set -euo pipefail
@@ -118,6 +140,9 @@ jobs:
       - name: Build dav1d
         run: |
           set -euo pipefail
+          # Named here so a missing assembler reads as a missing assembler, rather than as whatever
+          # meson says several hundred lines later.
+          nasm -v || echo "no nasm on PATH, which is expected on Apple silicon and a failure anywhere else"
           meson setup build-dav1d "dav1d-${{ inputs.dav1d_version }}" \
             --prefix="$STAGE" \
             --buildtype=release \
