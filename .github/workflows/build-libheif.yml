@@ -48,6 +48,14 @@ on:
         description: zlib tag, which libpng needs
         required: true
         default: 1.3.2
+      # While a toolchain is being fixed, only that machine is worth running. Each one stops at its
+      # own point for its own reason, so a full run mostly re-proves what already worked and buries
+      # the one answer being waited on. Name the machines to build, comma separated, or leave it at
+      # all.
+      machines:
+        description: Machines to build, comma separated, or all
+        required: true
+        default: all
       publish:
         description: Publish a release as well as uploading the artifacts
         type: boolean
@@ -89,6 +97,9 @@ jobs:
             runs-on: windows-latest
             archive: zip
     runs-on: ${{ matrix.runs-on }}
+    # Commas around both sides, so one machine's name cannot match another's by being a prefix of
+    # it. A bare contains would let mac.amd64 answer to mac.a.
+    if: ${{ inputs.machines == 'all' || contains(format(',{0},', inputs.machines), format(',{0},', matrix.machine)) }}
     timeout-minutes: 45
 
     defaults:
@@ -402,7 +413,10 @@ jobs:
   # packaging build with a download error rather than anything that names the cause.
   publish:
     needs: build
-    if: ${{ inputs.publish }}
+    # Only a full run may publish. A release built from a subset would be missing archives that
+    # conveyor.conf names by URL, and the packaging build would then fail on a download error
+    # rather than on anything that says which machine was never built.
+    if: ${{ inputs.publish && inputs.machines == 'all' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
