@@ -88,23 +88,37 @@ jobs:
           # asking for a retired label queues against a name that does not exist. It never starts
           # and never fails, so the run simply never finishes, which reads as a busy runner.
           # GitHub then retires Intel macOS entirely when the macOS 15 image goes, in autumn 2027.
-          ALL='[
-            {"machine":"linux.amd64",  "runs-on":"ubuntu-22.04",   "archive":"tar.gz"},
-            {"machine":"mac.amd64",    "runs-on":"macos-15-intel", "archive":"tar.gz"},
-            {"machine":"mac.aarch64",  "runs-on":"macos-latest",   "archive":"tar.gz"},
-            {"machine":"windows.amd64","runs-on":"windows-latest", "archive":"zip"}
-          ]'
-          if [ "$WANTED" = "all" ]; then
-            PICKED=$(echo "$ALL" | jq -c .)
-          else
-            # Commas wrap both sides, so one machine cannot answer to another's prefix.
-            PICKED=$(echo "$ALL" | jq -c --arg want ",$WANTED," '[.[] | select($want | contains("," + .machine + ","))]')
-          fi
+          # python3 rather than jq, because this exact program runs on a development machine too
+          # and jq is not on every one of them. A filter nobody can run outside CI gets debugged
+          # by dispatching, which is what the first attempt at this cost.
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+
+          machines = [
+              {"machine": "linux.amd64",   "runs-on": "ubuntu-22.04",   "archive": "tar.gz"},
+              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "archive": "tar.gz"},
+              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "archive": "tar.gz"},
+              {"machine": "windows.amd64", "runs-on": "windows-latest", "archive": "zip"},
+          ]
+
+          wanted = os.environ["WANTED"].strip()
+          if wanted == "all":
+              picked = machines
+          else:
+              # Commas wrap both sides, so one machine cannot answer to another's prefix.
+              names = "," + wanted.replace(" ", "") + ","
+              picked = [m for m in machines if "," + m["machine"] + "," in names]
+
           # A name nobody recognises would otherwise produce an empty matrix, which GitHub treats
           # as a job with nothing to do rather than as a mistake.
-          [ "$(echo "$PICKED" | jq 'length')" -gt 0 ] || { echo "no machine matches '$WANTED'"; exit 1; }
-          echo "$PICKED" | jq -r '.[].machine' | sed 's/^/building /'
-          echo "matrix={\"include\":$PICKED}" >> "$GITHUB_OUTPUT"
+          if not picked:
+              print(f"no machine matches {wanted!r}", file=sys.stderr)
+              raise SystemExit(1)
+
+          for m in picked:
+              print("building " + m["machine"], file=sys.stderr)
+          print("matrix=" + json.dumps({"include": picked}))
+          PY
 
   build:
     needs: plan
