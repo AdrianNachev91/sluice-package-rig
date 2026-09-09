@@ -141,9 +141,14 @@ jobs:
         run: |
           set -euo pipefail
           CM="libheif-${{ inputs.libheif_version }}/examples/CMakeLists.txt"
-          sed -i 's/^add_executable(heif-enc /add_executable(heif-enc EXCLUDE_FROM_ALL /' "$CM"
-          sed -i '/^install(TARGETS heif-enc /d' "$CM"
-          sed -i '/^install(FILES heif-enc\.1 /d' "$CM"
+          # Through a temporary file rather than sed -i. BSD sed takes a mandatory backup suffix
+          # after -i and reads the script as that suffix, so the GNU form fails on macOS with
+          # "extra characters at the end of l command".
+          sed -e 's/^add_executable(heif-enc /add_executable(heif-enc EXCLUDE_FROM_ALL /' \
+              -e '/^install(TARGETS heif-enc /d' \
+              -e '/^install(FILES heif-enc\.1 /d' \
+              "$CM" > "$CM.patched"
+          mv "$CM.patched" "$CM"
           grep -q 'add_executable(heif-enc EXCLUDE_FROM_ALL ' "$CM" || { echo "the add_executable patch matched nothing"; exit 1; }
           ! grep -q '^install(TARGETS heif-enc ' "$CM" || { echo "the install patch matched nothing"; exit 1; }
           ! grep -q '^install(FILES heif-enc\.1 ' "$CM" || { echo "the man-page patch matched nothing"; exit 1; }
