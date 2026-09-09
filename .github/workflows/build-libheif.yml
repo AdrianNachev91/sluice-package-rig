@@ -126,6 +126,29 @@ jobs:
           curl -fsSL "https://github.com/pnggroup/libpng/archive/refs/tags/v${{ inputs.libpng_version }}.tar.gz" | tar xz
           ls -d libde265-* dav1d-* libheif-* zlib-* libpng-*
 
+      # libheif 1.23.4 cannot build its encoder example without libtiff. heif_enc.cc references
+      # TiledTiffReader unconditionally, while the heifio library compiles that reader out when
+      # libtiff is absent, so the link fails on an unresolved TiffCloser. Windows is where it bites,
+      # being the image that does not carry libtiff.
+      #
+      # Supplying libtiff would fix the link and is the wrong trade: a whole image library added to
+      # satisfy a tool this archive deletes anyway. So the target is dropped instead, and its own
+      # install lines with it, since CMake cannot install a target it never built.
+      #
+      # Each edit is asserted. A sed that matches nothing changes nothing and says nothing, which
+      # would leave this looking fixed until the next version moves the line.
+      - name: Drop libheif's encoder example
+        run: |
+          set -euo pipefail
+          CM="libheif-${{ inputs.libheif_version }}/examples/CMakeLists.txt"
+          sed -i 's/^add_executable(heif-enc /add_executable(heif-enc EXCLUDE_FROM_ALL /' "$CM"
+          sed -i '/^install(TARGETS heif-enc /d' "$CM"
+          sed -i '/^install(FILES heif-enc\.1 /d' "$CM"
+          grep -q 'add_executable(heif-enc EXCLUDE_FROM_ALL ' "$CM" || { echo "the add_executable patch matched nothing"; exit 1; }
+          ! grep -q '^install(TARGETS heif-enc ' "$CM" || { echo "the install patch matched nothing"; exit 1; }
+          ! grep -q '^install(FILES heif-enc\.1 ' "$CM" || { echo "the man-page patch matched nothing"; exit 1; }
+          grep -n 'heif-enc' "$CM"
+
       # Every library and the tool itself install into one staging tree, which is also what gets
       # archived. The runtime search path is set at configure time rather than patched afterwards,
       # so the tool finds its own libraries wherever the archive is unpacked.
@@ -306,7 +329,12 @@ jobs:
           set -euo pipefail
           rm -rf "$STAGE/include" "$STAGE/share" "$STAGE/lib/cmake" "$STAGE/lib/pkgconfig"
           find "$STAGE/lib" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
-          find "$STAGE/bin" -type f \( -name '*-config' -o -name 'dec265*' -o -name 'heif-enc*' -o -name 'heif-info*' \) -delete
+          # Static archives are a compiler's business, and only zlib installs one.
+          find "$STAGE/lib" -name '*.a' -delete
+          # Symlinks as well as files. A -type f sweep took libpng16-config and left libpng-config
+          # pointing at it, so the first pass shipped a dangling link inside a signed package.
+          find "$STAGE/bin" \( -type f -o -type l \) \
+            \( -name '*-config' -o -name 'dec265*' -o -name 'heif-enc*' -o -name 'heif-info*' \) -delete
           mkdir -p "$STAGE/licenses"
           cp "libheif-${{ inputs.libheif_version }}/COPYING"     "$STAGE/licenses/libheif-COPYING.txt"
           cp "libde265-${{ inputs.libde265_version }}/COPYING"   "$STAGE/licenses/libde265-COPYING.txt"
