@@ -35,6 +35,19 @@ on:
         description: dav1d tag, the AV1 decoder AVIF needs
         required: true
         default: 1.5.1
+      # The tool writes PNG, which is the format Sluice asks it for, and that needs libpng and
+      # zlib. Built here rather than taken from the machine, for two reasons. Windows has no system
+      # libpng at all, so an archive that expects one is not self-contained. And a build that finds
+      # one library's headers and another's runtime produces a tool that decodes correctly and then
+      # cannot write the result, which is what macOS did at 1.4.12 headers against a 1.6.58 runtime.
+      libpng_version:
+        description: libpng tag, which is how the tool writes PNG
+        required: true
+        default: 1.6.58
+      zlib_version:
+        description: zlib tag, which libpng needs
+        required: true
+        default: 1.3.2
       publish:
         description: Publish a release as well as uploading the artifacts
         type: boolean
@@ -109,7 +122,9 @@ jobs:
           curl -fsSL "https://github.com/strukturag/libde265/releases/download/v${{ inputs.libde265_version }}/libde265-${{ inputs.libde265_version }}.tar.gz" | tar xz
           curl -fsSL "https://code.videolan.org/videolan/dav1d/-/archive/${{ inputs.dav1d_version }}/dav1d-${{ inputs.dav1d_version }}.tar.gz" | tar xz
           curl -fsSL "https://github.com/strukturag/libheif/releases/download/v${{ inputs.libheif_version }}/libheif-${{ inputs.libheif_version }}.tar.gz" | tar xz
-          ls -d libde265-* dav1d-* libheif-*
+          curl -fsSL "https://github.com/madler/zlib/releases/download/v${{ inputs.zlib_version }}/zlib-${{ inputs.zlib_version }}.tar.gz" | tar xz
+          curl -fsSL "https://github.com/pnggroup/libpng/archive/refs/tags/v${{ inputs.libpng_version }}.tar.gz" | tar xz
+          ls -d libde265-* dav1d-* libheif-* zlib-* libpng-*
 
       # Every library and the tool itself install into one staging tree, which is also what gets
       # archived. The runtime search path is set at configure time rather than patched afterwards,
@@ -123,6 +138,43 @@ jobs:
             mac.*)     echo "RPATH=@executable_path/../lib" >> "$GITHUB_ENV" ;;
             windows.*) echo "RPATH="                        >> "$GITHUB_ENV" ;;
           esac
+          # An rpath is where the tool looks when it RUNS. The linker needs telling separately, and
+          # GNU ld says so itself: "libdav1d.so.7, needed by libheif.so, not found (try using
+          # -rpath or -rpath-link)". Nothing else needs it. Apple's linker records each library's
+          # own install name, and Windows resolves by DLL name at load time.
+          if [ "${{ matrix.machine }}" = "linux.amd64" ]; then
+            echo "LDFLAGS=-Wl,-rpath-link,$PWD/stage/lib" >> "$GITHUB_ENV"
+          fi
+
+      # Every CMake build here pins the library directory. Left alone, one of them installs to
+      # lib64 or to a per-architecture subdirectory, and the next build's linker then searches a
+      # directory nothing was installed into.
+      - name: Build zlib
+        run: |
+          set -euo pipefail
+          cmake -S zlib-${{ inputs.zlib_version }} -B build-zlib \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_INSTALL_RPATH="$RPATH" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+          cmake --build build-zlib --config Release --target install
+
+      - name: Build libpng
+        run: |
+          set -euo pipefail
+          cmake -S libpng-${{ inputs.libpng_version }} -B build-png \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_PREFIX_PATH="$STAGE" \
+            -DCMAKE_INSTALL_RPATH="$RPATH" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DPNG_SHARED=ON \
+            -DPNG_STATIC=OFF \
+            -DPNG_TOOLS=OFF \
+            -DPNG_TESTS=OFF
+          cmake --build build-png --config Release --target install
 
       - name: Build libde265
         run: |
@@ -130,6 +182,7 @@ jobs:
           cmake -S libde265-${{ inputs.libde265_version }} -B build-de265 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_INSTALL_RPATH="$RPATH" \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DBUILD_SHARED_LIBS=ON \
@@ -145,6 +198,7 @@ jobs:
           nasm -v || echo "no nasm on PATH, which is expected on Apple silicon and a failure anywhere else"
           meson setup build-dav1d "dav1d-${{ inputs.dav1d_version }}" \
             --prefix="$STAGE" \
+            --libdir=lib \
             --buildtype=release \
             --default-library=shared \
             --vsenv \
@@ -155,18 +209,24 @@ jobs:
       # Plugin loading off, so both decoders link straight into libheif and the archive holds no
       # separate plugin directory to find at runtime. Every encoder is off explicitly rather than by
       # default, since a default that changes would pull x265 in and bind the archive to GPL.
+      #
+      # Doxygen is refused rather than merely unwanted. Where the image happens to carry it, libheif
+      # adds an apidoc target that then fails on missing Graphviz map files, so a documentation tool
+      # nobody asked for decides whether the build succeeds. Windows is the image that has it.
       - name: Build libheif and its tools
         run: |
           set -euo pipefail
           cmake -S libheif-${{ inputs.libheif_version }} -B build-heif \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="$STAGE" \
             -DCMAKE_INSTALL_RPATH="$RPATH" \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTING=OFF \
             -DENABLE_PLUGIN_LOADING=OFF \
+            -DCMAKE_DISABLE_FIND_PACKAGE_Doxygen=ON \
             -DWITH_LIBDE265=ON \
             -DWITH_DAV1D=ON \
             -DWITH_AOM_DECODER=OFF \
