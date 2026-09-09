@@ -1,0 +1,227 @@
+# Builds the HEIF decoder Sluice bundles, one archive per machine it ships to.
+#
+# Why this lives here rather than in Sluice's own repository. Nothing publishes a libheif build that
+# covers all four machines. Upstream ships source only. photoprism builds Linux per distro codename.
+# The Windows binary in Sluice's CI is one person's 2022 repository. Homebrew is macOS alone, and
+# linked to its own prefix. macOS cannot be built from the developer machine at all, and this
+# repository is public, where macOS runners are free.
+#
+# Dynamically linked on purpose. libheif and libde265 are LGPL, and shipping the shared library
+# beside the tool is what lets somebody replace it. A static binary would owe relinkable objects.
+#
+# Decode only. Sluice reads HEIC and AVIF and writes neither, so no encoder is built. That keeps
+# x265 out, which is GPL and would bind the whole archive.
+#
+# Run it by hand when a version moves, never on a push. Its output is a release that Sluice's
+# conveyor.conf points at by URL, the way Conveyor already pulls the JavaFX jmods.
+
+name: Build libheif
+
+on:
+  workflow_dispatch:
+    inputs:
+      libheif_version:
+        description: libheif tag to build, without the leading v
+        required: true
+        default: 1.23.4
+      libde265_version:
+        description: libde265 tag, the HEVC decoder HEIC needs
+        required: true
+        default: 1.0.15
+      dav1d_version:
+        description: dav1d tag, the AV1 decoder AVIF needs
+        required: true
+        default: 1.5.1
+      publish:
+        description: Publish a release as well as uploading the artifacts
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # Four different toolchains. One failing says nothing about the other three, and the first
+      # run's whole job is to learn which of them need work.
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported image rather than the newest. A binary linked against glibc 2.39
+          # refuses to start on anything older, where one linked against 2.35 runs on both.
+          - machine: linux.amd64
+            runs-on: ubuntu-22.04
+            archive: tar.gz
+          - machine: mac.amd64
+            runs-on: macos-13
+            archive: tar.gz
+          - machine: mac.aarch64
+            runs-on: macos-14
+            archive: tar.gz
+          - machine: windows.amd64
+            runs-on: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Report the environment
+        run: |
+          cmake --version
+          echo "machine: ${{ matrix.machine }}"
+          uname -a || ver
+
+      # dav1d is the one dependency here that does not use CMake. Meson and ninja come from pip so
+      # the same line works on all three operating systems.
+      - name: Install meson and ninja
+        run: pip install meson ninja
+
+      - name: Fetch the sources
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/strukturag/libde265/releases/download/v${{ inputs.libde265_version }}/libde265-${{ inputs.libde265_version }}.tar.gz" | tar xz
+          curl -fsSL "https://code.videolan.org/videolan/dav1d/-/archive/${{ inputs.dav1d_version }}/dav1d-${{ inputs.dav1d_version }}.tar.gz" | tar xz
+          curl -fsSL "https://github.com/strukturag/libheif/releases/download/v${{ inputs.libheif_version }}/libheif-${{ inputs.libheif_version }}.tar.gz" | tar xz
+          ls -d libde265-* dav1d-* libheif-*
+
+      # Every library and the tool itself install into one staging tree, which is also what gets
+      # archived. The runtime search path is set at configure time rather than patched afterwards,
+      # so the tool finds its own libraries wherever the archive is unpacked.
+      - name: Set the staging paths
+        run: |
+          set -euo pipefail
+          echo "STAGE=$PWD/stage" >> "$GITHUB_ENV"
+          case "${{ matrix.machine }}" in
+            linux.*)   echo "RPATH=\$ORIGIN/../lib"        >> "$GITHUB_ENV" ;;
+            mac.*)     echo "RPATH=@executable_path/../lib" >> "$GITHUB_ENV" ;;
+            windows.*) echo "RPATH="                        >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Build libde265
+        run: |
+          set -euo pipefail
+          cmake -S libde265-${{ inputs.libde265_version }} -B build-de265 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_INSTALL_RPATH="$RPATH" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DBUILD_SHARED_LIBS=ON \
+            -DENABLE_SDL=OFF \
+            -DENABLE_ENCODER=OFF
+          cmake --build build-de265 --config Release --target install
+
+      - name: Build dav1d
+        run: |
+          set -euo pipefail
+          meson setup build-dav1d "dav1d-${{ inputs.dav1d_version }}" \
+            --prefix="$STAGE" \
+            --buildtype=release \
+            --default-library=shared \
+            --vsenv \
+            -Denable_tools=false \
+            -Denable_tests=false
+          meson install -C build-dav1d
+
+      # Plugin loading off, so both decoders link straight into libheif and the archive holds no
+      # separate plugin directory to find at runtime. Every encoder is off explicitly rather than by
+      # default, since a default that changes would pull x265 in and bind the archive to GPL.
+      - name: Build libheif and its tools
+        run: |
+          set -euo pipefail
+          cmake -S libheif-${{ inputs.libheif_version }} -B build-heif \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$STAGE" \
+            -DCMAKE_PREFIX_PATH="$STAGE" \
+            -DCMAKE_INSTALL_RPATH="$RPATH" \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_PLUGIN_LOADING=OFF \
+            -DWITH_LIBDE265=ON \
+            -DWITH_DAV1D=ON \
+            -DWITH_AOM_DECODER=OFF \
+            -DWITH_AOM_ENCODER=OFF \
+            -DWITH_X265=OFF \
+            -DWITH_SvtEnc=OFF \
+            -DWITH_RAV1E=OFF \
+            -DWITH_EXAMPLES=ON \
+            -DWITH_EXAMPLE_HEIF_VIEW=OFF \
+            -DWITH_EXAMPLE_HEIF_THUMB=OFF
+          cmake --build build-heif --config Release --target install
+
+      # The decoder is heif-dec and heif-convert is the compatibility alias upstream still creates,
+      # a symlink here and a real copy on Windows. Sluice looks for heif-convert, so the check is
+      # that the alias survived both the build and the archive.
+      - name: Prove the tool runs and decodes
+        run: |
+          set -euo pipefail
+          find "$STAGE" -type f | sort
+          if [ "${{ matrix.machine }}" = "windows.amd64" ]; then
+            TOOL="$STAGE/bin/heif-convert.exe"
+          else
+            TOOL="$STAGE/bin/heif-convert"
+          fi
+          "$TOOL" --version
+          "$TOOL" "libheif-${{ inputs.libheif_version }}/examples/example.heic" heic-out.png
+          "$TOOL" "libheif-${{ inputs.libheif_version }}/examples/example.avif" avif-out.png
+          ls -l heic-out*.png avif-out*.png
+
+      # Read the tool's own linkage rather than trusting the rpath flags. A library resolved from
+      # the runner's own directories works here and is absent on a user's machine.
+      - name: Report what the tool links against
+        continue-on-error: true
+        run: |
+          case "${{ matrix.machine }}" in
+            linux.*)   ldd "$STAGE/bin/heif-dec" ;;
+            mac.*)     otool -L "$STAGE/bin/heif-dec" ;;
+            windows.*) ls -l "$STAGE/bin" ;;
+          esac
+
+      - name: Make the archive
+        run: |
+          set -euo pipefail
+          NAME="libheif-${{ inputs.libheif_version }}-${{ matrix.machine }}"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd "$STAGE" && 7z a "../$NAME.zip" .)
+          else
+            tar czf "$NAME.tar.gz" -C "$STAGE" .
+          fi
+          ls -l "$NAME".*
+          echo "ARCHIVE=$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.machine }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # Its own job, so a release only exists once every machine built. A release carrying three of four
+  # archives is worse than none: conveyor.conf names all four by URL, and the missing one fails the
+  # packaging build with a download error rather than anything that names the cause.
+  publish:
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+
+      # gh rather than a third-party release action. It ships with the runner, so the release step
+      # adds nothing to the supply chain of a package that gets signed.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find archives -type f | sort
+          gh release create "libheif-${{ inputs.libheif_version }}" \
+            --repo "${{ github.repository }}" \
+            --title "libheif ${{ inputs.libheif_version }}" \
+            --notes "Decode-only libheif ${{ inputs.libheif_version }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository." \
+            $(find archives -type f | sort)
