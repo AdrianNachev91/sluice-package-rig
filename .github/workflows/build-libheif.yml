@@ -65,41 +65,55 @@ permissions:
   contents: write
 
 jobs:
+  # The matrix is built here rather than written into the build job, because a job-level `if`
+  # cannot see `matrix`. GitHub evaluates that condition before the matrix expands, and a workflow
+  # naming `matrix` there is rejected outright at dispatch.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          WANTED: ${{ inputs.machines }}
+        run: |
+          set -euo pipefail
+          # linux.amd64 is the one image deliberately not on its latest label, and it is not a
+          # stale pin. Every library in the archive is at its current release. What the image
+          # decides is the glibc a user needs to start the binary at all, which is a floor rather
+          # than a version: built on 24.04 it wants 2.39, which Debian 12, Ubuntu 22.04 and RHEL 9
+          # do not have. Built here it wants 2.35 and runs on those and on the newer ones.
+          #
+          # mac.amd64 is macos-15-intel because macos-13 was retired on 2025-12-04, and a job
+          # asking for a retired label queues against a name that does not exist. It never starts
+          # and never fails, so the run simply never finishes, which reads as a busy runner.
+          # GitHub then retires Intel macOS entirely when the macOS 15 image goes, in autumn 2027.
+          ALL='[
+            {"machine":"linux.amd64",  "runs-on":"ubuntu-22.04",   "archive":"tar.gz"},
+            {"machine":"mac.amd64",    "runs-on":"macos-15-intel", "archive":"tar.gz"},
+            {"machine":"mac.aarch64",  "runs-on":"macos-latest",   "archive":"tar.gz"},
+            {"machine":"windows.amd64","runs-on":"windows-latest", "archive":"zip"}
+          ]'
+          if [ "$WANTED" = "all" ]; then
+            PICKED=$(echo "$ALL" | jq -c .)
+          else
+            # Commas wrap both sides, so one machine cannot answer to another's prefix.
+            PICKED=$(echo "$ALL" | jq -c --arg want ",$WANTED," '[.[] | select($want | contains("," + .machine + ","))]')
+          fi
+          # A name nobody recognises would otherwise produce an empty matrix, which GitHub treats
+          # as a job with nothing to do rather than as a mistake.
+          [ "$(echo "$PICKED" | jq 'length')" -gt 0 ] || { echo "no machine matches '$WANTED'"; exit 1; }
+          echo "$PICKED" | jq -r '.[].machine' | sed 's/^/building /'
+          echo "matrix={\"include\":$PICKED}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     strategy:
       # Four different toolchains. One failing says nothing about the other three, and the first
       # run's whole job is to learn which of them need work.
       fail-fast: false
-      matrix:
-        include:
-          # The one image deliberately not on its latest label, and it is not a stale pin. Every
-          # library in this archive is at its current release. What the image decides is the glibc
-          # a user needs to start the binary at all, and that is a floor rather than a version:
-          # built on 24.04 it wants 2.39, which Debian 12, Ubuntu 22.04 and RHEL 9 do not have.
-          # Built here it wants 2.35 and runs on all of them, the newer ones included.
-          - machine: linux.amd64
-            runs-on: ubuntu-22.04
-            archive: tar.gz
-          # macos-15-intel, because macos-13 was retired on 2025-12-04 and a job asking for it
-          # queues against a label that does not exist. It never starts and it never fails, so the
-          # run simply never finishes, which reads like a busy runner rather than a dead one.
-          #
-          # Intel macOS has an end date of its own: GitHub retires the architecture when the
-          # macOS 15 image goes, in autumn 2027. Whether Sluice still ships a mac.amd64 build by
-          # then is a decision for that day, not an assumption to bake in here.
-          - machine: mac.amd64
-            runs-on: macos-15-intel
-            archive: tar.gz
-          - machine: mac.aarch64
-            runs-on: macos-latest
-            archive: tar.gz
-          - machine: windows.amd64
-            runs-on: windows-latest
-            archive: zip
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runs-on }}
-    # Commas around both sides, so one machine's name cannot match another's by being a prefix of
-    # it. A bare contains would let mac.amd64 answer to mac.a.
-    if: ${{ inputs.machines == 'all' || contains(format(',{0},', inputs.machines), format(',{0},', matrix.machine)) }}
     timeout-minutes: 45
 
     defaults:
