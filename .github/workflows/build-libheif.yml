@@ -311,9 +311,24 @@ jobs:
             windows.*) ls -l "$STAGE/bin" ;;
           esac
 
-      # The decoder is heif-dec and heif-convert is the compatibility alias upstream still creates,
-      # a symlink here and a real copy on Windows. Sluice looks for heif-convert, so the check is
-      # that the alias survived both the build and the archive.
+      # The decoder is heif-dec. Sluice invokes heif-convert, which upstream provides as a
+      # compatibility alias: a symlink on Unix, a copy on Windows. The Windows copy does not
+      # arrive, and nothing in the build says so, because Windows only ever got this far once the
+      # encoder stopped failing the link.
+      #
+      # Made here rather than chased upstream. The archive has to carry that name on every machine,
+      # and an alias whose mechanism differs per platform is a thing to guarantee rather than hope
+      # for. Where the build already made one, this leaves it alone.
+      - name: Make sure the name Sluice invokes exists
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.machine }}" = "windows.amd64" ]; then
+            [ -e "$STAGE/bin/heif-convert.exe" ] || cp "$STAGE/bin/heif-dec.exe" "$STAGE/bin/heif-convert.exe"
+          else
+            [ -e "$STAGE/bin/heif-convert" ] || ln -s heif-dec "$STAGE/bin/heif-convert"
+          fi
+          ls -l "$STAGE/bin"
+
       - name: Prove the tool runs and decodes
         run: |
           set -euo pipefail
@@ -343,9 +358,15 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$STAGE/include" "$STAGE/share" "$STAGE/lib/cmake" "$STAGE/lib/pkgconfig"
-          find "$STAGE/lib" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
-          # Static archives are a compiler's business, and only zlib installs one.
-          find "$STAGE/lib" -name '*.a' -delete
+          # Guarded, because Windows puts every DLL in bin and may leave no lib at all. An
+          # unguarded find on a missing directory ends the step under set -e.
+          if [ -d "$STAGE/lib" ]; then
+            find "$STAGE/lib" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+            # A compiler's business, both of them: zlib installs a static archive, and Windows
+            # installs an import library per DLL. Neither is loaded by anything at runtime.
+            find "$STAGE/lib" \( -name '*.a' -o -name '*.lib' \) -delete
+            rmdir "$STAGE/lib" 2>/dev/null || true
+          fi
           # Symlinks as well as files. A -type f sweep took libpng16-config and left libpng-config
           # pointing at it, so the first pass shipped a dangling link inside a signed package.
           find "$STAGE/bin" \( -type f -o -type l \) \
