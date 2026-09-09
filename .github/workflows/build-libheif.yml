@@ -34,7 +34,7 @@ on:
       dav1d_version:
         description: dav1d tag, the AV1 decoder AVIF needs
         required: true
-        default: 1.5.1
+        default: 1.5.4
       # The tool writes PNG, which is the format Sluice asks it for, and that needs libpng and
       # zlib. Built here rather than taken from the machine, for two reasons. Windows has no system
       # libpng at all, so an archive that expects one is not self-contained. And a build that finds
@@ -64,16 +64,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The oldest supported image rather than the newest. A binary linked against glibc 2.39
-          # refuses to start on anything older, where one linked against 2.35 runs on both.
+          # The one image deliberately not on its latest label, and it is not a stale pin. Every
+          # library in this archive is at its current release. What the image decides is the glibc
+          # a user needs to start the binary at all, and that is a floor rather than a version:
+          # built on 24.04 it wants 2.39, which Debian 12, Ubuntu 22.04 and RHEL 9 do not have.
+          # Built here it wants 2.35 and runs on all of them, the newer ones included.
           - machine: linux.amd64
             runs-on: ubuntu-22.04
             archive: tar.gz
+          # macos-15-intel, because macos-13 was retired on 2025-12-04 and a job asking for it
+          # queues against a label that does not exist. It never starts and it never fails, so the
+          # run simply never finishes, which reads like a busy runner rather than a dead one.
+          #
+          # Intel macOS has an end date of its own: GitHub retires the architecture when the
+          # macOS 15 image goes, in autumn 2027. Whether Sluice still ships a mac.amd64 build by
+          # then is a decision for that day, not an assumption to bake in here.
           - machine: mac.amd64
-            runs-on: macos-13
+            runs-on: macos-15-intel
             archive: tar.gz
           - machine: mac.aarch64
-            runs-on: macos-14
+            runs-on: macos-latest
             archive: tar.gz
           - machine: windows.amd64
             runs-on: windows-latest
