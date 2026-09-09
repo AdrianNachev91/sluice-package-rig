@@ -213,6 +213,17 @@ jobs:
       # Doxygen is refused rather than merely unwanted. Where the image happens to carry it, libheif
       # adds an apidoc target that then fails on missing Graphviz map files, so a documentation tool
       # nobody asked for decides whether the build succeeds. Windows is the image that has it.
+      #
+      # PNG_ROOT and ZLIB_ROOT name the staged copies outright, since a prefix path alone did not
+      # win on macOS. That build compiled against a 1.4.12 png.h and loaded the staged 1.6.58 at
+      # runtime, so the tool decoded correctly and then refused to write. Frameworks and app bundles
+      # go last for the same reason: macOS searches them ahead of an ordinary prefix.
+      #
+      # Every other optional dependency is refused by name, and the point is that all four machines
+      # then build the same thing. Left to search, each one finds a different set in its own image
+      # and builds a different libheif. Windows found TIFF, so it compiled a TIFF reader into the
+      # shared code and then failed to link the encoder against it. Nothing here needs any of them:
+      # the tool reads HEIC and AVIF and writes PNG.
       - name: Build libheif and its tools
         run: |
           set -euo pipefail
@@ -221,12 +232,22 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$STAGE" \
             -DCMAKE_INSTALL_LIBDIR=lib \
             -DCMAKE_PREFIX_PATH="$STAGE" \
+            -DPNG_ROOT="$STAGE" \
+            -DZLIB_ROOT="$STAGE" \
+            -DCMAKE_FIND_FRAMEWORK=LAST \
+            -DCMAKE_FIND_APPBUNDLE=LAST \
             -DCMAKE_INSTALL_RPATH="$RPATH" \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTING=OFF \
             -DENABLE_PLUGIN_LOADING=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_Doxygen=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_TIFF=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_JPEG=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_WEBP=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_X264=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenH264=ON \
+            -DCMAKE_DISABLE_FIND_PACKAGE_LIBSHARPYUV=ON \
             -DWITH_LIBDE265=ON \
             -DWITH_DAV1D=ON \
             -DWITH_AOM_DECODER=OFF \
@@ -239,13 +260,25 @@ jobs:
             -DWITH_EXAMPLE_HEIF_THUMB=OFF
           cmake --build build-heif --config Release --target install
 
+      # Before the proof rather than after it. A diagnostic placed behind the step it explains never
+      # runs on the day it is wanted, which is what the run-3 macOS failure cost: the tool could not
+      # write a PNG and nothing said which libpng it had found.
+      - name: Report what the tool links against
+        continue-on-error: true
+        run: |
+          find "$STAGE" -type f | sort
+          case "${{ matrix.machine }}" in
+            linux.*)   ldd "$STAGE/bin/heif-dec" ;;
+            mac.*)     otool -L "$STAGE/bin/heif-dec" ;;
+            windows.*) ls -l "$STAGE/bin" ;;
+          esac
+
       # The decoder is heif-dec and heif-convert is the compatibility alias upstream still creates,
       # a symlink here and a real copy on Windows. Sluice looks for heif-convert, so the check is
       # that the alias survived both the build and the archive.
       - name: Prove the tool runs and decodes
         run: |
           set -euo pipefail
-          find "$STAGE" -type f | sort
           if [ "${{ matrix.machine }}" = "windows.amd64" ]; then
             TOOL="$STAGE/bin/heif-convert.exe"
           else
@@ -256,16 +289,31 @@ jobs:
           "$TOOL" "libheif-${{ inputs.libheif_version }}/examples/example.avif" avif-out.png
           ls -l heic-out*.png avif-out*.png
 
-      # Read the tool's own linkage rather than trusting the rpath flags. A library resolved from
-      # the runner's own directories works here and is absent on a user's machine.
-      - name: Report what the tool links against
-        continue-on-error: true
+      # A staging tree is a development install. The archive is a runtime, so everything that only
+      # a compiler or a package manager would read comes out: headers, CMake and pkg-config files,
+      # man pages, the *-config scripts, and a gdk-pixbuf loader that Linux installs whether or not
+      # anything asked.
+      #
+      # The encoders go too, and that one is not about size. Nothing here builds an encoder that
+      # works, Sluice never writes these formats, and an encoding tool inside a package carrying a
+      # code-signing certificate is a liability with no matching use.
+      #
+      # The licence texts go in, which is the other half of linking to LGPL libraries dynamically.
+      # Shipping the shared library is what makes replacing it possible, and shipping the licence is
+      # what tells somebody they may.
+      - name: Reduce the staging tree to what actually ships
         run: |
-          case "${{ matrix.machine }}" in
-            linux.*)   ldd "$STAGE/bin/heif-dec" ;;
-            mac.*)     otool -L "$STAGE/bin/heif-dec" ;;
-            windows.*) ls -l "$STAGE/bin" ;;
-          esac
+          set -euo pipefail
+          rm -rf "$STAGE/include" "$STAGE/share" "$STAGE/lib/cmake" "$STAGE/lib/pkgconfig"
+          find "$STAGE/lib" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          find "$STAGE/bin" -type f \( -name '*-config' -o -name 'dec265*' -o -name 'heif-enc*' -o -name 'heif-info*' \) -delete
+          mkdir -p "$STAGE/licenses"
+          cp "libheif-${{ inputs.libheif_version }}/COPYING"     "$STAGE/licenses/libheif-COPYING.txt"
+          cp "libde265-${{ inputs.libde265_version }}/COPYING"   "$STAGE/licenses/libde265-COPYING.txt"
+          cp "dav1d-${{ inputs.dav1d_version }}/COPYING"         "$STAGE/licenses/dav1d-COPYING.txt"
+          cp "libpng-${{ inputs.libpng_version }}/LICENSE"       "$STAGE/licenses/libpng-LICENSE.txt"
+          cp "zlib-${{ inputs.zlib_version }}/LICENSE"           "$STAGE/licenses/zlib-LICENSE.txt"
+          find "$STAGE" | sort
 
       - name: Make the archive
         run: |
