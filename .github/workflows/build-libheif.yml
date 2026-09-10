@@ -95,10 +95,10 @@ jobs:
           import json, os, sys
 
           machines = [
-              {"machine": "linux.amd64",   "runs-on": "ubuntu-22.04",   "archive": "tar.gz"},
-              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "archive": "tar.gz"},
-              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "archive": "tar.gz"},
-              {"machine": "windows.amd64", "runs-on": "windows-latest", "archive": "zip"},
+              {"machine": "linux.amd64",   "runs-on": "ubuntu-22.04",   "archive": "tar.gz", "deployment_target": ""},
+              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "archive": "tar.gz", "deployment_target": "11.0"},
+              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "archive": "tar.gz", "deployment_target": "11.0"},
+              {"machine": "windows.amd64", "runs-on": "windows-latest", "archive": "zip",    "deployment_target": ""},
           ]
 
           wanted = os.environ["WANTED"].strip()
@@ -222,6 +222,19 @@ jobs:
           if [ "${{ matrix.machine }}" = "linux.amd64" ]; then
             echo "LDFLAGS=-Wl,-rpath-link,$PWD/stage/lib" >> "$GITHUB_ENV"
           fi
+
+      # Left alone, a macOS build's Mach-O headers record the runner's own OS as the floor, not a
+      # chosen one. macos-latest moved to 26 the day this bit: the Apple Silicon archive refused to
+      # launch on the previous release, since nothing here had ever told the compiler otherwise.
+      #
+      # 11.0 rather than the runner's default, on both mac legs. It is the first macOS Apple
+      # Silicon ever shipped on, so it costs nothing on that machine, and it matches the floor
+      # Conveyor already assumes for the rest of the app when nothing overrides it. Picking the
+      # same number the app already accepts is what keeps this a one-line fix instead of a second,
+      # separate decision about what Sluice's real minimum should be.
+      - name: Set the macOS deployment target
+        if: ${{ startsWith(matrix.machine, 'mac.') }}
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }}" >> "$GITHUB_ENV"
 
       # Every CMake build here pins the library directory. Left alone, one of them installs to
       # lib64 or to a per-architecture subdirectory, and the next build's linker then searches a
