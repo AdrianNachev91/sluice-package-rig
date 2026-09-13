@@ -101,6 +101,7 @@ case "$MACHINE" in
 
     CLI="$APP/Contents/MacOS/sluice"
     GUI_LAUNCH=(open -a "$APP")
+    GUI_MATCH="Sluice.app"
     ;;
 
   windows.amd64)
@@ -115,6 +116,16 @@ case "$MACHINE" in
     [ -n "$CLI" ] || { fail "no sluice on PATH after Add-AppxPackage, so the execution alias was not registered"; exit 1; }
     pass "the command line alias resolved to $CLI"
     GUI_LAUNCH=(powershell -NoProfile -Command "Start-Process SluiceDesktop")
+    GUI_MATCH="SluiceDesktop"
+
+    # The portable zip holds the same bytes the MSIX does, unpacked somewhere with ordinary
+    # permissions. Windows locks the installed package's own directory to the app's identity, so a
+    # shell cannot run anything out of it however correct the file is.
+    PORTABLE="$(find "$PKGDIR" -name "sluice-*-windows-amd64.zip" -print -quit)"
+    if [ -n "$PORTABLE" ]; then
+      mkdir -p "$PKGDIR/portable"
+      unzip -q -o "$PORTABLE" -d "$PKGDIR/portable"
+    fi
     ;;
 
   linux.amd64)
@@ -125,9 +136,22 @@ case "$MACHINE" in
     CLI="$(command -v sluice || true)"
     [ -n "$CLI" ] || { fail "no sluice on PATH after installing $DEB"; exit 1; }
     pass "the command line launcher resolved to $CLI"
+
+    # Taken out of the desktop entry rather than assumed, because that entry is the only way in a
+    # Linux user has. Nothing puts the window's launcher on PATH, so a name guessed here would test
+    # a route nobody can take.
+    ENTRY=/usr/share/applications/photos.sluice.desktop
+    if [ -f "$ENTRY" ]; then
+      EXEC_LINE="$(grep -m1 '^Exec=' "$ENTRY" | cut -d= -f2-)"
+      pass "the desktop entry launches $EXEC_LINE"
+    else
+      fail "no desktop entry at $ENTRY, so the app has no menu item"
+      EXEC_LINE=/usr/lib/sluice/bin/SluiceDesktop
+    fi
     # No display on the runner, so the window opens against a virtual one. Without this the launch
     # below fails on the display rather than on anything about the package.
-    GUI_LAUNCH=(xvfb-run -a SluiceDesktop)
+    GUI_LAUNCH=(xvfb-run -a "$EXEC_LINE")
+    GUI_MATCH="/usr/lib/sluice/bin/"
     ;;
 
   *)
@@ -168,6 +192,14 @@ esac
 section "command line launcher"
 
 run_quiet "sluice --help" "$CLI" --help
+# Exit 0 and a clean error stream are both satisfied by a launcher that prints nothing at all, and
+# printing nothing is the failure this surface is most exposed to. A Windows executable declares in
+# its header whether it is a console program, and a GUI declaration silences everything it writes.
+if grep -q "sift" "$LAST_STDOUT" && grep -q "app" "$LAST_STDOUT"; then
+  pass "the help names the verbs, so the console launcher is not silenced"
+else
+  fail "the help did not name the verbs, so nothing reached the terminal"
+fi
 
 run_quiet "sluice --version" "$CLI" --version
 if [ -n "${LAST_STDOUT:-}" ]; then
@@ -192,11 +224,24 @@ case "$MACHINE" in
   windows.*)   DECODER="$(dirname "$(readlink -f "$CLI")")/../app/heif/bin/heif-convert.exe" ;;
   linux.*)     DECODER="$(dirname "$(readlink -f "$CLI")")/../lib/app/heif/bin/heif-convert" ;;
 esac
-if [ -x "$DECODER" ]; then
-  "$DECODER" --version && pass "the bundled decoder runs from the installed tree" \
-    || fail "the bundled decoder is present but will not run"
+if [ -e "$DECODER" ]; then
+  pass "the decoder shipped to $DECODER, which is where the app looks"
 else
   fail "no bundled decoder at $DECODER"
+fi
+
+# Windows runs it out of the portable copy, since the installed one sits behind the package's own
+# permissions and no shell may execute it. Same bytes, so the answer is about the binary rather
+# than about where it was read from.
+case "$MACHINE" in
+  windows.*) RUNNABLE="$PKGDIR/portable/app/heif/bin/heif-convert.exe" ;;
+  *)         RUNNABLE="$DECODER" ;;
+esac
+if [ -e "$RUNNABLE" ]; then
+  "$RUNNABLE" --version && pass "the bundled decoder runs and links against its own libraries" \
+    || fail "the bundled decoder will not run, so no HEIC or AVIF can be read"
+else
+  fail "nothing runnable at $RUNNABLE"
 fi
 
 section "window launcher"
@@ -211,12 +256,12 @@ GUI_PID=$!
 sleep 20
 case "$MACHINE" in
   windows.*)
-    ALIVE=(powershell -NoProfile -Command "if (Get-Process SluiceDesktop -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }")
-    STOP=(powershell -NoProfile -Command "Stop-Process -Name SluiceDesktop -Force -ErrorAction SilentlyContinue")
+    ALIVE=(powershell -NoProfile -Command "if (Get-Process $GUI_MATCH -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }")
+    STOP=(powershell -NoProfile -Command "Stop-Process -Name $GUI_MATCH -Force -ErrorAction SilentlyContinue")
     ;;
   *)
-    ALIVE=(pgrep -f SluiceDesktop)
-    STOP=(pkill -f SluiceDesktop)
+    ALIVE=(pgrep -f "$GUI_MATCH")
+    STOP=(pkill -f "$GUI_MATCH")
     ;;
 esac
 if "${ALIVE[@]}" > /dev/null 2>&1; then

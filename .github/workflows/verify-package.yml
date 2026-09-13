@@ -67,11 +67,15 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os, sys
 
+          # Windows takes two. The MSIX is what gets installed and what the update channel runs
+          # through, and Windows locks an installed package's directory to the app's own identity,
+          # so a shell cannot execute the decoder out of it. The portable zip holds the same bytes
+          # somewhere a shell may read them.
           machines = [
-              {"machine": "linux.amd64",   "runs-on": "ubuntu-latest",  "asset": "sluice_*_amd64.deb"},
-              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "asset": "sluice-*-mac-amd64.zip"},
-              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "asset": "sluice-*-mac-aarch64.zip"},
-              {"machine": "windows.amd64", "runs-on": "windows-latest", "asset": "sluice-*.x64.msix"},
+              {"machine": "linux.amd64",   "runs-on": "ubuntu-latest",  "assets": "sluice_*_amd64.deb"},
+              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "assets": "sluice-*-mac-amd64.zip"},
+              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "assets": "sluice-*-mac-aarch64.zip"},
+              {"machine": "windows.amd64", "runs-on": "windows-latest", "assets": "sluice-*.x64.msix sluice-*-windows-amd64.zip"},
           ]
 
           wanted = os.environ["WANTED"].strip()
@@ -110,18 +114,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # One asset rather than the whole release. The site carries every machine's package plus the
-      # feeds, and downloading all of it would pull close to half a gigabyte onto each runner to
-      # use one file of it.
+      # Named assets rather than the whole release. The site carries every machine's package plus
+      # the feeds, and taking all of it would pull close to half a gigabyte onto each runner to use
+      # one file of it.
       - name: Download the package under test
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p package
+          PATTERNS=()
+          for p in ${{ matrix.assets }}; do PATTERNS+=(--pattern "$p"); done
           gh release download "${{ inputs.release_tag }}" \
             --repo "${{ github.repository }}" \
-            --pattern "${{ matrix.asset }}" \
+            "${PATTERNS[@]}" \
             --dir package
           ls -l package
 
