@@ -2,8 +2,8 @@
 
 A verification rig for [Sluice](https://github.com/AdrianNachev91/sluice) installers.
 
-Sluice is built and signed elsewhere. This repository holds no source code. What it holds is a
-GitHub Actions workflow, a smoke-test script, and the packages under test, published here as
+Sluice is built and signed elsewhere. This repository holds no source code. What it holds is two
+GitHub Actions workflows, the scripts they run, and the packages under test, published here as
 releases.
 
 The job is the part that cannot be done from a developer machine: take a built package, install it
@@ -20,8 +20,13 @@ Decode only, and dynamically linked. Sluice reads HEIC and AVIF and writes neith
 built. Shipping the shared library beside the tool is what lets somebody replace it, which is what
 its LGPL licence is for.
 
-Each archive holds `heif-dec`, the `heif-convert` name Sluice invokes, five shared libraries and
-five licence texts. Nothing a compiler would read.
+Each archive holds `heif-dec`, the `heif-convert` name Sluice invokes, the shared libraries the tool
+loads and their licence texts. Nothing a compiler would read.
+
+The Windows archive also carries Microsoft's C runtime, which is not part of Windows and arrives
+with the Visual C++ redistributable. Without it the tool cannot start on a machine that has never
+installed a program needing it. Each workflow run checks that claim rather than trusting it: every
+binary's dependencies have to be either the operating system's own or present in the archive.
 
 ## Verifying a package
 
