@@ -1,0 +1,138 @@
+# Installs a built Sluice package on a clean runner and launches it.
+#
+# Why this lives here rather than in Sluice's own repository. That one is private, where a macOS
+# runner draws ten times its wall clock against the monthly allowance, so every dispatch has to be
+# asked for one at a time. Standard runners are free and unlimited on public repositories, macOS
+# included. This repository holds no source, so making it public costs nothing.
+#
+# What it answers that a build cannot. The release machine proves a package was produced and
+# signed. It cannot say whether the operating system accepts that signature, whether the installer
+# puts the launchers where the app looks for them, or whether a first launch survives the checks a
+# real download goes through. Those need a machine that has never seen the app.
+#
+# The packages under test are release assets in this repository. Building them stays on the release
+# machine, because signing reads a passphrase from a console. Only the built artifact crosses over.
+
+name: Verify package
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: The release in this repository holding the packages under test
+        required: true
+        default: sluice-0.1.0
+      # Asserted rather than read back off the package, because the point of the check is that the
+      # build tells a user the same version the release does. Reading it from the artifact would
+      # make any answer agree with itself.
+      expected_version:
+        description: What `sluice --version` has to print, after the word Sluice
+        required: true
+        default: 0.1.0
+      # While one machine is being fixed, only that machine is worth running. Each installs through
+      # a different mechanism and fails for its own reasons, so a full run mostly re-proves what
+      # already worked and buries the answer being waited on.
+      machines:
+        description: Machines to verify, comma separated, or all
+        required: true
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  # The matrix is built here rather than written into the verify job, because a job-level `if`
+  # cannot see `matrix`. GitHub evaluates that condition before the matrix expands, and a workflow
+  # naming `matrix` there is rejected outright at dispatch.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          WANTED: ${{ inputs.machines }}
+        run: |
+          set -euo pipefail
+          # linux.amd64 verifies on the newest image rather than the oldest, which is the opposite
+          # of what the decoder build wants. That one picks an image to set the glibc floor a user
+          # needs. This one asks whether the package installs on a machine somebody might own.
+          #
+          # mac.amd64 is macos-15-intel because macos-13 was retired on 2025-12-04, and a job
+          # asking for a retired label queues against a name that does not exist. It never starts
+          # and never fails, so the run simply never finishes, which reads as a busy runner.
+          #
+          # python3 rather than jq, because this exact program runs on a development machine too
+          # and jq is not on every one of them.
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+
+          machines = [
+              {"machine": "linux.amd64",   "runs-on": "ubuntu-latest",  "asset": "sluice_*_amd64.deb"},
+              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "asset": "sluice-*-mac-amd64.zip"},
+              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "asset": "sluice-*-mac-aarch64.zip"},
+              {"machine": "windows.amd64", "runs-on": "windows-latest", "asset": "sluice-*.x64.msix"},
+          ]
+
+          wanted = os.environ["WANTED"].strip()
+          if wanted == "all":
+              picked = machines
+          else:
+              # Commas wrap both sides, so one machine cannot answer to another's prefix.
+              names = "," + wanted.replace(" ", "") + ","
+              picked = [m for m in machines if "," + m["machine"] + "," in names]
+
+          # A name nobody recognises would otherwise produce an empty matrix, which GitHub treats
+          # as a job with nothing to do rather than as a mistake.
+          if not picked:
+              print(f"no machine matches {wanted!r}", file=sys.stderr)
+              raise SystemExit(1)
+
+          for m in picked:
+              print("verifying " + m["machine"], file=sys.stderr)
+          print("matrix=" + json.dumps({"include": picked}))
+          PY
+
+  verify:
+    needs: plan
+    strategy:
+      # One machine failing says nothing about the other three. They share a package and nothing
+      # else: three installers, three signature stories, three ways to reach a launcher.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # One asset rather than the whole release. The site carries every machine's package plus the
+      # feeds, and downloading all of it would pull close to half a gigabyte onto each runner to
+      # use one file of it.
+      - name: Download the package under test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ matrix.asset }}" \
+            --dir package
+          ls -l package
+
+      # Linux opens its window against a virtual display. Without one the launch fails on the
+      # display rather than on anything about the package, which is an answer to a question nobody
+      # asked.
+      - name: Install a virtual display
+        if: ${{ startsWith(matrix.machine, 'linux.') }}
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Install, launch and report
+        run: |
+          chmod +x smoke-test.sh
+          ./smoke-test.sh "${{ matrix.machine }}" package "${{ inputs.expected_version }}"

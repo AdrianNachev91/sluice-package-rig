@@ -23,6 +23,37 @@ its LGPL licence is for.
 Each archive holds `heif-dec`, the `heif-convert` name Sluice invokes, five shared libraries and
 five licence texts. Nothing a compiler would read.
 
+## Verifying a package
+
+`.github/workflows/verify-package.yml` takes the packages off a release in this repository,
+installs each one on a clean runner, and launches it. `smoke-test.sh` is what it runs there, and it
+is an ordinary bash script that works on a developer machine too.
+
+```
+gh workflow run verify-package.yml --repo AdrianNachev91/sluice-package-rig --ref main \
+  -f release_tag=sluice-0.1.0 -f expected_version=0.1.0 -f machines=all
+```
+
+macOS gets the archive marked as downloaded before it is unpacked, so Gatekeeper is asked the
+question a user's own first launch asks. Windows installs the MSIX, which is the same path the
+update channel runs through. Linux installs the deb.
+
+Every check runs and the failures are counted, rather than the first one ending the job. A macOS
+run takes long enough that answering one question per dispatch is its own cost.
+
+## Releases in this repository
+
+Two unrelated things are released here, and only one of them may carry GitHub's Latest label.
+
+Sluice's own packages are built and signed elsewhere and published here as `sluice-<version>`.
+Every URL baked into them resolves through `releases/latest/download`, so the Latest release is
+what an installed copy reads as its update feed.
+
+The decoder archives are published as `libheif-<version>` with that label explicitly refused. A
+decoder release holding the label would leave every installed copy reading an update feed with no
+application in it. Nothing on the machine would report an error. It would simply stop being offered
+updates.
+
 ## Running the build
 
 It runs on request, never on a push, because its output only changes when a library version does.

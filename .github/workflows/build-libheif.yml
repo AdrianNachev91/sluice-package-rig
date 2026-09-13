@@ -466,6 +466,12 @@ jobs:
 
       # gh rather than a third-party release action. It ships with the runner, so the release step
       # adds nothing to the supply chain of a package that gets signed.
+      #
+      # --latest=false, and it is load-bearing rather than tidy. Sluice's own packages are released
+      # in this same repository, and every URL Conveyor bakes into them resolves through
+      # releases/latest/download. A decoder release taking that label would point every installed
+      # copy's update feed at a set of archives holding no application, and nothing on the machine
+      # would report an error. It would simply stop being offered updates.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -474,6 +480,7 @@ jobs:
           find archives -type f | sort
           gh release create "libheif-${{ inputs.libheif_version }}" \
             --repo "${{ github.repository }}" \
+            --latest=false \
             --title "libheif ${{ inputs.libheif_version }}" \
             --notes "Decode-only libheif ${{ inputs.libheif_version }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository." \
             $(find archives -type f | sort)
