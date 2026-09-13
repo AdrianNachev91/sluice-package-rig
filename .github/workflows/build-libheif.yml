@@ -296,6 +296,24 @@ jobs:
             -Denable_tests=false
           meson install -C build-dav1d
 
+      # meson gives a macOS library its install prefix as its own name, and that prefix is this
+      # runner's working directory. libheif then records that absolute path as the dependency, so
+      # the tool aborts on any other machine with "Library not loaded" naming a directory that only
+      # ever existed here. Linux is unaffected, where a SONAME is a bare name and the rpath decides.
+      #
+      # Rewritten before libheif is built, since what libheif records is whatever the name says at
+      # link time. Every CMake library here already carries an @rpath name, which CMake does on its
+      # own.
+      - name: Give dav1d a relocatable name
+        if: ${{ startsWith(matrix.machine, 'mac.') }}
+        run: |
+          set -euo pipefail
+          for lib in "$STAGE"/lib/libdav1d*.dylib; do
+            [ -L "$lib" ] && continue
+            install_name_tool -id "@rpath/$(basename "$lib")" "$lib"
+            otool -D "$lib"
+          done
+
       # Plugin loading off, so both decoders link straight into libheif and the archive holds no
       # separate plugin directory to find at runtime. Every encoder is off explicitly rather than by
       # default, since a default that changes would pull x265 in and bind the archive to GPL.
@@ -380,6 +398,38 @@ jobs:
             [ -e "$STAGE/bin/heif-convert" ] || ln -s heif-dec "$STAGE/bin/heif-convert"
           fi
           ls -l "$STAGE/bin"
+
+      # A macOS binary records each dependency by the name that library calls itself, and that name
+      # can be an absolute path into whatever directory built it. The build machine has that
+      # directory, so the step below decodes happily and the archive is broken for everybody else.
+      # It took an installed package on a clean machine to find out, which is one round trip too
+      # many for something a single command answers here.
+      - name: Refuse any dependency that only this runner could resolve
+        if: ${{ startsWith(matrix.machine, 'mac.') }}
+        run: |
+          set -euo pipefail
+          BAD=0
+          for f in "$STAGE"/bin/* "$STAGE"/lib/*.dylib; do
+            [ -L "$f" ] && continue
+            # bin still holds the *-config shell scripts at this point, and otool errors on a file
+            # that is not a Mach-O binary.
+            file -b "$f" | grep -q Mach-O || continue
+            # otool prints the file's own name first. A library then prints its install name on the
+            # next line before its dependencies start, and an executable has no such line. Skipping
+            # a fixed number of lines for both would let an executable's first dependency through.
+            case "$f" in
+              *.dylib) SKIP=3 ;;
+              *)       SKIP=2 ;;
+            esac
+            while read -r dep _; do
+              case "$dep" in
+                @rpath/*|@executable_path/*|@loader_path/*|/usr/lib/*|/System/*) ;;
+                *) echo "$f loads $dep"; BAD=1 ;;
+              esac
+            done < <(otool -L "$f" | tail -n +"$SKIP" | sed 's/^[[:space:]]*//')
+          done
+          [ "$BAD" -eq 0 ] || { echo "a dependency above names a path that exists only on this runner"; exit 1; }
+          echo "every dependency resolves relative to the archive or to the system"
 
       - name: Prove the tool runs and decodes
         run: |
