@@ -327,11 +327,17 @@ jobs:
       # runtime, so the tool decoded correctly and then refused to write. Frameworks and app bundles
       # go last for the same reason: macOS searches them ahead of an ordinary prefix.
       #
-      # Every other optional dependency is refused by name, and the point is that all four machines
-      # then build the same thing. Left to search, each one finds a different set in its own image
-      # and builds a different libheif. Windows found TIFF, so it compiled a TIFF reader into the
+      # Every other optional dependency is refused, and the point is that all four machines then
+      # build the same thing. Left to search, each one finds a different set in its own image and
+      # builds a different libheif. Windows found TIFF, so it compiled a TIFF reader into the
       # shared code and then failed to link the encoder against it. Nothing here needs any of them:
       # the tool reads HEIC and AVIF and writes PNG.
+      #
+      # libsharpyuv is refused through libheif's own option rather than through the package name,
+      # which is the only one of these that CMake spells in lower case. A
+      # CMAKE_DISABLE_FIND_PACKAGE_ whose casing misses is silently no configuration at all, and it
+      # reads as protection. macOS was the one image carrying the library, through Homebrew, and it
+      # linked against a path under /opt that no user machine has.
       - name: Build libheif and its tools
         run: |
           set -euo pipefail
@@ -355,7 +361,7 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_WEBP=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_X264=ON \
             -DCMAKE_DISABLE_FIND_PACKAGE_OpenH264=ON \
-            -DCMAKE_DISABLE_FIND_PACKAGE_LIBSHARPYUV=ON \
+            -DWITH_LIBSHARPYUV=OFF \
             -DWITH_LIBDE265=ON \
             -DWITH_DAV1D=ON \
             -DWITH_AOM_DECODER=OFF \
