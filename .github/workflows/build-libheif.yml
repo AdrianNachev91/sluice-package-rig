@@ -591,15 +591,29 @@ jobs:
       # releases/latest/download. A decoder release taking that label would point every installed
       # copy's update feed at a set of archives holding no application, and nothing on the machine
       # would report an error. It would simply stop being offered updates.
+      #
+      # A tag that already exists is the ordinary case, not a mistake. The tag names a libheif
+      # version, and a rebuild at the same version is what a fix to this workflow produces. Replacing
+      # the assets keeps the tag and the release notes, where deleting the release first leaves
+      # conveyor.conf pointing at nothing for as long as the rebuild takes.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: libheif-${{ inputs.libheif_version }}
+          NOTES: "Decode-only libheif ${{ inputs.libheif_version }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository."
         run: |
           set -euo pipefail
           find archives -type f | sort
-          gh release create "libheif-${{ inputs.libheif_version }}" \
-            --repo "${{ github.repository }}" \
-            --latest=false \
-            --title "libheif ${{ inputs.libheif_version }}" \
-            --notes "Decode-only libheif ${{ inputs.libheif_version }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository." \
-            $(find archives -type f | sort)
+          if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release upload "$TAG" --repo "${{ github.repository }}" --clobber $(find archives -type f | sort)
+            gh release edit "$TAG" --repo "${{ github.repository }}" --latest=false \
+              --title "libheif ${{ inputs.libheif_version }}" --notes "$NOTES"
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --latest=false \
+              --title "libheif ${{ inputs.libheif_version }}" \
+              --notes "$NOTES" \
+              $(find archives -type f | sort)
+          fi
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[] | "\(.name) \(.size)"'
