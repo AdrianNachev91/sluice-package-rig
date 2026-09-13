@@ -11,7 +11,7 @@
 # red step answers one question per dispatch, and a macOS dispatch takes long enough that the
 # difference matters.
 #
-# Usage: smoke-test.sh <machine> <package-dir> <expected-version>
+# Usage: smoke-test.sh <machine> <package-dir> <expected-version> <heic fixture>
 
 set -uo pipefail
 
@@ -21,6 +21,7 @@ MACHINE="${1:?machine}"
 # then reports "Unable to locate package package", naming a package nobody asked for.
 PKGDIR="$(cd "${2:?package directory}" && pwd)"
 EXPECTED_VERSION="${3:?expected version}"
+HEIC="${4:?heic fixture}"
 
 FAILURES=0
 
@@ -238,8 +239,25 @@ case "$MACHINE" in
   *)         RUNNABLE="$DECODER" ;;
 esac
 if [ -e "$RUNNABLE" ]; then
-  "$RUNNABLE" --version && pass "the bundled decoder runs and links against its own libraries" \
-    || fail "the bundled decoder will not run, so no HEIC or AVIF can be read"
+  if "$RUNNABLE" --version; then
+    pass "the bundled decoder runs and links against its own libraries"
+    # Starting and decoding are different claims. Starting says the libraries load. Decoding says
+    # the codecs inside them survived being signed, notarized and installed, which is the step no
+    # build machine performs.
+    # The tool numbers its output when the file holds more than one image, so what it writes is
+    # decoded.png or decoded-1.png. Globbing for both means a multi-image fixture cannot read as a
+    # failure to decode.
+    rm -f "$PKGDIR"/decoded*.png
+    "$RUNNABLE" "$HEIC" "$PKGDIR/decoded.png" || true
+    WRITTEN="$(find "$PKGDIR" -name 'decoded*.png' -size +0c | head -1)"
+    if [ -n "$WRITTEN" ]; then
+      pass "the bundled decoder read a real HEIC and wrote $(wc -c < "$WRITTEN") bytes of PNG"
+    else
+      fail "the bundled decoder started but could not read a HEIC"
+    fi
+  else
+    fail "the bundled decoder will not run, so no HEIC or AVIF can be read"
+  fi
 else
   fail "nothing runnable at $RUNNABLE"
 fi

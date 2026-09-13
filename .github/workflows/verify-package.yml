@@ -138,7 +138,17 @@ jobs:
         if: ${{ startsWith(matrix.machine, 'linux.') }}
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
+      # libheif's own example image, taken from the release the bundled decoder is built from. A
+      # fixture committed here would be one more file to keep in step with that version, and this
+      # one is the file upstream tests against.
+      - name: Fetch a real HEIC to decode
+        run: |
+          set -euo pipefail
+          curl -fsSL -o example.heic \
+            "https://github.com/strukturag/libheif/raw/v1.23.4/examples/example.heic"
+          ls -l example.heic
+
       - name: Install, launch and report
         run: |
           chmod +x smoke-test.sh
-          ./smoke-test.sh "${{ matrix.machine }}" package "${{ inputs.expected_version }}"
+          ./smoke-test.sh "${{ matrix.machine }}" package "${{ inputs.expected_version }}" "$PWD/example.heic"
