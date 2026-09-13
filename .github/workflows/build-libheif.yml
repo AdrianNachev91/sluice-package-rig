@@ -135,6 +135,8 @@ jobs:
         shell: bash
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Report the environment
         run: |
           cmake --version
@@ -374,6 +376,35 @@ jobs:
             -DWITH_EXAMPLE_HEIF_THUMB=OFF
           cmake --build build-heif --config Release --target install
 
+      # MSVC compiles against a C runtime Windows does not ship. ucrtbase and the api-ms-win-crt
+      # forwarders are part of the operating system since Windows 10 1709, and msvcp140 and
+      # vcruntime140 are not: they arrive with the Visual C++ redistributable, which many
+      # applications install and Windows Update never does. A machine without it cannot start
+      # heif-dec at all, and Sluice's own copies are no help, sitting in the app's directory rather
+      # than beside this tool, which is where Windows looks first.
+      #
+      # Microsoft documents this placement and permits it. "It's also possible to directly install
+      # the Redistributable DLLs in the application local folder", with redistribution "limited to
+      # licensed Visual Studio users and subject to Microsoft Software License Terms", and a
+      # recommendation against it on servicing grounds: a copy here is not patched by Windows
+      # Update, so a fix to the runtime needs this workflow run again. Checked 2026-09-13 at
+      # learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files.
+      #
+      # Found rather than guessed. The redist path carries the toolset version, and a wrong guess
+      # would surface much later as a decoder that refuses to start on somebody else's machine.
+      - name: Bring the Windows C runtime into the archive
+        if: ${{ startsWith(matrix.machine, 'windows.') }}
+        run: |
+          set -euo pipefail
+          FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -path "*x64/Microsoft.VC*.CRT/msvcp140.dll" -print -quit)
+          [ -n "$FOUND" ] || { echo "no Visual C++ redistributable on this image"; exit 1; }
+          SRC=$(dirname "$FOUND")
+          echo "redistributable at $SRC"
+          for dll in msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll; do
+            if [ -f "$SRC/$dll" ]; then cp "$SRC/$dll" "$STAGE/bin/"; fi
+          done
+          ls -l "$STAGE/bin"
+
       # Before the proof rather than after it. A diagnostic placed behind the step it explains never
       # runs on the day it is wanted, which is what the run-3 macOS failure cost: the tool could not
       # write a PNG and nothing said which libpng it had found.
@@ -436,6 +467,38 @@ jobs:
           done
           [ "$BAD" -eq 0 ] || { echo "a dependency above names a path that exists only on this runner"; exit 1; }
           echo "every dependency resolves relative to the archive or to the system"
+
+      # The same question the macOS step asks, in the form each platform answers it. Linux records a
+      # bare SONAME and Windows a bare DLL name, so neither can name the build machine outright.
+      # What they can do is name a library that happens to be installed here, which then has to be
+      # installed on the user's machine too for the tool to start.
+      #
+      # The allowlists are what the operating system itself provides. Everything else has to be in
+      # the archive, which is the whole claim the archive makes.
+      - name: Refuse a dependency the archive cannot supply
+        if: ${{ !startsWith(matrix.machine, 'mac.') }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.machine }}" in
+            linux.*)
+              SYSTEM="libc.so.6 libm.so.6 libdl.so.2 librt.so.1 libpthread.so.0 libstdc++.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2"
+              BAD=0
+              for f in "$STAGE"/bin/* "$STAGE"/lib/*.so*; do
+                [ -L "$f" ] && continue
+                file -b "$f" | grep -q ELF || continue
+                while read -r dep; do
+                  case " $SYSTEM " in *" $dep "*) continue ;; esac
+                  [ -e "$STAGE/lib/$dep" ] || { echo "$f needs $dep, which is not in the archive"; BAD=1; }
+                done < <(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+              done
+              ;;
+            windows.*)
+              BAD=0
+              python windows-imports.py "$STAGE" || BAD=1
+              ;;
+          esac
+          [ "$BAD" -eq 0 ] || { echo "a dependency above has to be installed separately for the tool to start"; exit 1; }
+          echo "every dependency is either the operating system's or inside the archive"
 
       - name: Prove the tool runs and decodes
         run: |
