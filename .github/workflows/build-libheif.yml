@@ -396,7 +396,12 @@ jobs:
         if: ${{ startsWith(matrix.machine, 'windows.') }}
         run: |
           set -euo pipefail
-          FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -path "*x64/Microsoft.VC*.CRT/msvcp140.dll" -print -quit)
+          # An image carries several of these and they are not interchangeable. The onecore flavour
+          # is for Server Core and Windows on ARM devices, and a desktop binary that loads it fails
+          # to start with no message a shell can report, which reads as the tool not existing. Older
+          # toolsets sit beside the current one too, so the highest version wins and the search
+          # requires vcruntime140_1.dll, which only the toolsets this build uses have.
+          FOUND=$(find "/c/Program Files/Microsoft Visual Studio" -path "*/x64/Microsoft.VC*.CRT/vcruntime140_1.dll" ! -path "*onecore*" | sort -V | tail -1)
           [ -n "$FOUND" ] || { echo "no Visual C++ redistributable on this image"; exit 1; }
           SRC=$(dirname "$FOUND")
           echo "redistributable at $SRC"
@@ -404,6 +409,10 @@ jobs:
             if [ -f "$SRC/$dll" ]; then cp "$SRC/$dll" "$STAGE/bin/"; fi
           done
           ls -l "$STAGE/bin"
+          # Here rather than at the step that decodes, because a copy beside the executable takes
+          # precedence over the machine's own and a wrong one stops the tool from loading at all.
+          # That surfaces as exit 127, which names nothing.
+          "$STAGE/bin/heif-dec.exe" --version
 
       # Before the proof rather than after it. A diagnostic placed behind the step it explains never
       # runs on the day it is wanted, which is what the run-3 macOS failure cost: the tool could not
