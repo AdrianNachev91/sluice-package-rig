@@ -16,7 +16,10 @@
 set -uo pipefail
 
 MACHINE="${1:?machine}"
-PKGDIR="${2:?package directory}"
+# Absolute, because apt reads an argument as a package name unless it starts with a slash or a dot.
+# A relative "package/sluice_0.1.0_amd64.deb" is parsed as the pkg/release form instead, and apt
+# then reports "Unable to locate package package", naming a package nobody asked for.
+PKGDIR="$(cd "${2:?package directory}" && pwd)"
 EXPECTED_VERSION="${3:?expected version}"
 
 FAILURES=0
@@ -179,9 +182,14 @@ fi
 section "bundled decoder"
 # Reached through the installed tree rather than the build directory, because the question is
 # whether the binaries survived packaging, signing and installation with the name the app invokes.
+#
+# Each of the three is `app.dir` with heif/bin under it, and each installer puts `app.dir` somewhere
+# else: the jars sit loose in Resources on macOS, under app/ beside the launchers on Windows, and
+# under lib/app/ on Linux. Written out per machine rather than searched for, so a decoder that
+# shipped to the wrong place reads as a failure instead of being found anyway.
 case "$MACHINE" in
-  mac.*)       DECODER="$APP/Contents/Resources/app/heif/bin/heif-convert" ;;
-  windows.*)   DECODER="$(dirname "$(readlink -f "$CLI")")/app/heif/bin/heif-convert.exe" ;;
+  mac.*)       DECODER="$APP/Contents/Resources/heif/bin/heif-convert" ;;
+  windows.*)   DECODER="$(dirname "$(readlink -f "$CLI")")/../app/heif/bin/heif-convert.exe" ;;
   linux.*)     DECODER="$(dirname "$(readlink -f "$CLI")")/../lib/app/heif/bin/heif-convert" ;;
 esac
 if [ -x "$DECODER" ]; then
