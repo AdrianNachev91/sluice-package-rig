@@ -84,10 +84,16 @@ The pair used for the update check is tagged with the bare version instead, `0.1
 Conveyor derives the tag it looks for from the version alone, so a package that is meant to serve
 updates has to sit under that name.
 
-The decoder archives are published as `libheif-<version>` with that label explicitly refused. A
-decoder release holding the label would leave every installed copy reading an update feed with no
-application in it. Nothing on the machine would report an error. It would simply stop being offered
-updates.
+The decoder archives are published as `libheif-<version>-<build>` with that label explicitly
+refused. A decoder release holding the label would leave every installed copy reading an update feed
+with no application in it. Nothing on the machine would report an error. It would simply stop being
+offered updates.
+
+The build number is what keeps a rebuild honest. Conveyor caches a download against its URL, so
+bytes replaced under a URL some build has already fetched are never fetched again. That build
+packages the copy it kept, succeeds, and ships a decoder that cannot start. So a tag here is
+published once and never replaced, and rebuilding the same libheif version means raising the build
+number. Publishing over an existing tag is refused.
 
 ## Running the build
 
@@ -95,8 +101,11 @@ It runs on request, never on a push, because its output only changes when a libr
 
 ```
 gh workflow run build-libheif.yml --repo AdrianNachev91/sluice-package-rig --ref main \
-  -f machines=all -f publish=true
+  -f machines=all -f publish=true -f build=2
 ```
+
+`build` is the number after the libheif version in the tag. Raise it whenever the same libheif
+version is built again, and point `app/conveyor.conf` at the new tag.
 
 While a toolchain is being fixed, name just that machine instead: `-f machines=windows.amd64`, or
 several comma separated. Each one stops at its own point for its own reason, so a full run mostly

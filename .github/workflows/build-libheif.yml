@@ -24,6 +24,15 @@ on:
         description: libheif tag to build, without the leading v
         required: true
         default: 1.23.4
+      # The tag this publishes under is the libheif version and this number together, and a rebuild
+      # at the same libheif version raises it. Conveyor caches a download against its URL, so bytes
+      # replaced under a URL a build has already seen are never fetched again. It packages the copy
+      # it kept, the build succeeds, and the defect surfaces as an application that cannot open a
+      # photo. A tag nobody has published is a URL nothing has cached.
+      build:
+        description: Build number for this libheif version, raised on every rebuild of it
+        required: true
+        default: "1"
       # 1.1.2 rather than the 1.0.x line, because that one declares a cmake_minimum_required below
       # 3.5 and CMake 4 removed support for it. The runner images that ship CMake 4 refuse to
       # configure it at all. 1.1.2 declares 3.16.3.
@@ -601,28 +610,35 @@ jobs:
       # copy's update feed at a set of archives holding no application, and nothing on the machine
       # would report an error. It would simply stop being offered updates.
       #
-      # A tag that already exists is the ordinary case, not a mistake. The tag names a libheif
-      # version, and a rebuild at the same version is what a fix to this workflow produces. Replacing
-      # the assets keeps the tag and the release notes, where deleting the release first leaves
-      # conveyor.conf pointing at nothing for as long as the rebuild takes.
+      # An existing tag is refused rather than replaced, and the refusal is the whole point of the
+      # build number. Conveyor caches a download against its URL, so replacing the bytes under a URL
+      # some build has already fetched leaves that build packaging the copy it kept. It succeeds,
+      # and what ships is a decoder that cannot start. Nothing anywhere reports it.
+      #
+      # Sluice's packages are released in this repository too, and every URL Conveyor bakes into
+      # them resolves through releases/latest/download. So --latest=false is load-bearing rather
+      # than tidy: a decoder release holding that label would point every installed copy's update
+      # feed at archives with no application in them, and nothing on the machine would say so. It
+      # would simply stop being offered updates.
+      #
+      # gh rather than a third-party release action. It ships with the runner, so this step adds
+      # nothing to the supply chain of a package that gets signed.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: libheif-${{ inputs.libheif_version }}
-          NOTES: "Decode-only libheif ${{ inputs.libheif_version }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository."
+          TAG: libheif-${{ inputs.libheif_version }}-${{ inputs.build }}
+          NOTES: "Decode-only libheif ${{ inputs.libheif_version }}, build ${{ inputs.build }}, with libde265 ${{ inputs.libde265_version }} for HEIC and dav1d ${{ inputs.dav1d_version }} for AVIF. One archive per machine Sluice ships to. Built by .github/workflows/build-libheif.yml in this repository."
         run: |
           set -euo pipefail
           find archives -type f | sort
           if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            gh release upload "$TAG" --repo "${{ github.repository }}" --clobber $(find archives -type f | sort)
-            gh release edit "$TAG" --repo "${{ github.repository }}" --latest=false \
-              --title "libheif ${{ inputs.libheif_version }}" --notes "$NOTES"
-          else
-            gh release create "$TAG" \
-              --repo "${{ github.repository }}" \
-              --latest=false \
-              --title "libheif ${{ inputs.libheif_version }}" \
-              --notes "$NOTES" \
-              $(find archives -type f | sort)
+            echo "$TAG is already published. Raise the build number and dispatch again." >&2
+            exit 1
           fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --latest=false \
+            --title "libheif ${{ inputs.libheif_version }} build ${{ inputs.build }}" \
+            --notes "$NOTES" \
+            $(find archives -type f | sort)
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[] | "\(.name) \(.size)"'
