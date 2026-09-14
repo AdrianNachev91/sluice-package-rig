@@ -56,6 +56,32 @@ installed_version() {
   esac
 }
 
+# Runs a command with a deadline, so a launcher that never returns is a counted failure rather than
+# a job the runner kills. A killed job loses the summary and every count with it, which reads as
+# infrastructure trouble rather than as an answer about the package.
+#
+# Written out rather than handed to `timeout`, which macOS does not ship and which is not on every
+# Windows image either. Polling works because bash reaps a finished background child, so `kill -0`
+# stops answering for it while `wait` still yields its status.
+TIMED_OUT=""
+run_bounded() {
+  local seconds="$1"; shift
+  TIMED_OUT=""
+  "$@" &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$seconds" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      TIMED_OUT="yes"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
 # Runs a command, prints both streams, and holds the caller to the exit code AND to an empty error
 # stream. The phase's own acceptance for the command line is that nothing leaks to stderr, since a
 # GUI-declared build on Windows silences one launcher and a framework report on the other stream
@@ -64,13 +90,15 @@ run_quiet() {
   local label="$1"; shift
   local out err status
   out="$(mktemp)"; err="$(mktemp)"
-  "$@" > "$out" 2> "$err"
+  run_bounded 120 "$@" > "$out" 2> "$err"
   status=$?
   echo "--- $label stdout"
   cat "$out"
   echo "--- $label stderr"
   cat "$err"
-  if [ "$status" -ne 0 ]; then
+  if [ -n "$TIMED_OUT" ]; then
+    fail "$label was still running after 120 seconds and was killed, so it never returned"
+  elif [ "$status" -ne 0 ]; then
     fail "$label exited $status"
   elif [ -s "$err" ]; then
     fail "$label wrote $(wc -c < "$err") bytes to stderr"
@@ -273,7 +301,7 @@ case "$MACHINE" in
   *)         RUNNABLE="$DECODER" ;;
 esac
 if [ -e "$RUNNABLE" ]; then
-  if "$RUNNABLE" --version; then
+  if run_bounded 60 "$RUNNABLE" --version; then
     pass "the bundled decoder runs and links against its own libraries"
     # Starting and decoding are different claims. Starting says the libraries load. Decoding says
     # the codecs inside them survived being signed, notarized and installed, which is the step no
@@ -282,13 +310,17 @@ if [ -e "$RUNNABLE" ]; then
     # decoded.png or decoded-1.png. Globbing for both means a multi-image fixture cannot read as a
     # failure to decode.
     rm -f "$PKGDIR"/decoded*.png
-    "$RUNNABLE" "$HEIC" "$PKGDIR/decoded.png" || true
+    run_bounded 60 "$RUNNABLE" "$HEIC" "$PKGDIR/decoded.png" || true
     WRITTEN="$(find "$PKGDIR" -name 'decoded*.png' -size +0c | head -1)"
     if [ -n "$WRITTEN" ]; then
       pass "the bundled decoder read a real HEIC and wrote $(wc -c < "$WRITTEN") bytes of PNG"
+    elif [ -n "$TIMED_OUT" ]; then
+      fail "the bundled decoder was still running on one HEIC after 60 seconds and was killed"
     else
       fail "the bundled decoder started but could not read a HEIC"
     fi
+  elif [ -n "$TIMED_OUT" ]; then
+    fail "the bundled decoder was still running after 60 seconds on --version and was killed"
   else
     fail "the bundled decoder will not run, so no HEIC or AVIF can be read"
   fi
