@@ -11,7 +11,7 @@
 # red step answers one question per dispatch, and a macOS dispatch takes long enough that the
 # difference matters.
 #
-# Usage: smoke-test.sh <machine> <package-dir> <expected-version> <heic fixture>
+# Usage: smoke-test.sh <machine> <package-dir> <expected-version> <heic fixture> [update-to-version]
 
 set -uo pipefail
 
@@ -22,6 +22,9 @@ MACHINE="${1:?machine}"
 PKGDIR="$(cd "${2:?package directory}" && pwd)"
 EXPECTED_VERSION="${3:?expected version}"
 HEIC="${4:?heic fixture}"
+# Empty unless this run is asking whether the installed copy replaces itself. Naming a version
+# rather than a flag, because the assertion is what the machine reports afterwards.
+UPDATE_TO_VERSION="${5:-}"
 
 FAILURES=0
 
@@ -100,9 +103,18 @@ case "$MACHINE" in
       fail "the quarantine attribute did not survive onto $APP, so Gatekeeper below is not being asked the real question"
     fi
 
+    # An app a person drags into /Applications belongs to that person, and Sparkle replaces the
+    # bundle in place when it updates. Unpacking under sudo leaves it owned by root, which is a
+    # state no user's machine is in, and which the updater can only write to by asking for
+    # credentials nothing here can answer.
+    sudo chown -R "$(id -u):$(id -g)" "$APP"
+
     CLI="$APP/Contents/MacOS/sluice"
     GUI_LAUNCH=(open -a "$APP")
-    GUI_MATCH="Sluice.app"
+    # The window launcher's own binary, not the bundle. Sparkle's updater runs from inside the same
+    # bundle, so a pattern naming the bundle finds the process installing an update and reads it as
+    # the app being up. Stopping the app by that pattern kills the installer along with it.
+    GUI_MATCH="$APP/Contents/MacOS/SluiceDesktop"
     ;;
 
   windows.amd64)
@@ -262,34 +274,130 @@ else
   fail "nothing runnable at $RUNNABLE"
 fi
 
-section "window launcher"
-# Alive after this long counts as launched. A JavaFX startup failure exits in under a second, and
-# the toolkit needs a few to put a window up on a cold machine.
-#
 # Windows gets its own pair of commands rather than pgrep and pkill, which git bash does not carry.
 # The bash ones are on the runner's PATH there and answer about nothing, so a check written once
 # for all three would pass on Windows by finding no process and reading that as no failure.
-"${GUI_LAUNCH[@]}" &
-GUI_PID=$!
-sleep 20
-case "$MACHINE" in
-  windows.*)
-    ALIVE=(powershell -NoProfile -Command "if (Get-Process $GUI_MATCH -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }")
-    STOP=(powershell -NoProfile -Command "Stop-Process -Name $GUI_MATCH -Force -ErrorAction SilentlyContinue")
-    ;;
-  *)
-    ALIVE=(pgrep -f "$GUI_MATCH")
-    STOP=(pkill -f "$GUI_MATCH")
-    ;;
-esac
-if "${ALIVE[@]}" > /dev/null 2>&1; then
+gui_alive() {
+  case "$MACHINE" in
+    windows.*) powershell -NoProfile -Command "if (Get-Process $GUI_MATCH -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" ;;
+    *)         pgrep -f "$GUI_MATCH" ;;
+  esac
+}
+
+gui_stop() {
+  case "$MACHINE" in
+    windows.*) powershell -NoProfile -Command "Stop-Process -Name $GUI_MATCH -Force -ErrorAction SilentlyContinue" ;;
+    *)         pkill -f "$GUI_MATCH" ;;
+  esac
+}
+
+# Launches, waits, and answers whether it was still there. Alive after this long counts as
+# launched: a JavaFX startup failure exits in under a second, and the toolkit needs a few to put a
+# window up on a cold machine.
+launch_and_settle() {
+  local seconds="$1"
+  "${GUI_LAUNCH[@]}" &
+  local pid=$!
+  sleep "$seconds"
+  local alive=1
+  gui_alive > /dev/null 2>&1 && alive=0
+  gui_stop > /dev/null 2>&1 || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return "$alive"
+}
+
+section "window launcher"
+if launch_and_settle 20; then
   pass "the window launcher was still running after 20 seconds"
 else
   fail "the window launcher was gone within 20 seconds, so it did not get a window up"
 fi
-"${STOP[@]}" > /dev/null 2>&1 || true
-kill "$GUI_PID" 2>/dev/null || true
-wait "$GUI_PID" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------------------------
+# Update in place
+#
+# Runs only when a fifth argument names the version this install is meant to move to. The feed it
+# reads is whichever release in this repository carries GitHub's Latest label, because that is what
+# every URL baked into the package resolves through.
+#
+# The version is read back off the operating system rather than out of `sluice --version`. That one
+# comes from the jar's manifest, which Maven fills from the pom, and the rig's pair of packages
+# differ only in the version Conveyor was given on the command line. So the jar answers the same in
+# both and could never show a move.
+# ---------------------------------------------------------------------------------------------
+installed_version() {
+  case "$MACHINE" in
+    mac.*)     plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" ;;
+    # No ToString on the end. An absent package leaves the property null, and calling a method on
+    # null is an error rather than an empty answer, which would read as a version nobody can parse
+    # instead of as a package that is not installed.
+    windows.*) powershell -NoProfile -Command "(Get-AppxPackage Sluice -ErrorAction SilentlyContinue).Version" | tr -d '\r' ;;
+  esac
+}
+
+if [ -n "$UPDATE_TO_VERSION" ]; then
+  section "update in place"
+
+  case "$MACHINE" in
+    mac.*)
+      OS_EXPECTED="$UPDATE_TO_VERSION"
+      ;;
+    windows.*)
+      # Windows carries four parts, the last being Conveyor's app.revision. Every build here leaves
+      # that at 0, and metadata.properties records the result as the version quad.
+      OS_EXPECTED="$UPDATE_TO_VERSION.0"
+      ;;
+    *)
+      OS_EXPECTED=""
+      # Said rather than skipped. A deb updates through an apt repository, which is a different
+      # mechanism with its own release assets, and no release here carries one.
+      fail "no update channel is verified on $MACHINE, so naming a version to move to cannot be answered"
+      ;;
+  esac
+
+  if [ -n "$OS_EXPECTED" ]; then
+    BEFORE="$(installed_version 2>/dev/null || true)"
+    echo "the machine reports the installed copy as: ${BEFORE:-nothing readable}"
+
+    if [ -z "$BEFORE" ]; then
+      fail "could not read the installed version, so there is nothing to compare an update against"
+    elif [ "$BEFORE" = "$OS_EXPECTED" ]; then
+      # Without this the run passes on a release that was already the new one, which is the shape
+      # a mistyped release tag takes.
+      fail "the installed copy already reports $BEFORE, so this run could not tell an update from a package that never moved"
+    else
+      # Both platforms check on startup, so each cycle is one launch. Sparkle downloads while the
+      # app runs and swaps the bundle once it exits, and App Installer hands the work to the
+      # operating system, so the reading is taken after the app is gone rather than while it runs.
+      #
+      # Two minutes a cycle because the download is 83 MB. Cut short, Sparkle starts it again on the
+      # next launch, so a cycle too brief to finish spends the whole deadline getting nowhere.
+      DEADLINE=$((SECONDS + 600))
+      AFTER="$BEFORE"
+      while [ "$SECONDS" -lt "$DEADLINE" ]; do
+        launch_and_settle 120 || true
+        sleep 20
+        AFTER="$(installed_version 2>/dev/null || true)"
+        echo "the machine now reports: ${AFTER:-nothing readable}"
+        [ "$AFTER" = "$OS_EXPECTED" ] && break
+      done
+
+      if [ "$AFTER" = "$OS_EXPECTED" ]; then
+        pass "the installed copy read the feed and replaced itself: $BEFORE became $AFTER"
+        # Replacing the files and running afterwards are different claims. An update that leaves a
+        # bundle the operating system will not start is the failure a version number cannot show.
+        if launch_and_settle 20; then
+          pass "the replaced copy still launches"
+        else
+          fail "the replaced copy would not stay running, so the update left the app unstartable"
+        fi
+      else
+        fail "the installed copy still reports \"${AFTER:-nothing readable}\" rather than $OS_EXPECTED, so the update did not apply"
+      fi
+    fi
+  fi
+fi
 
 section "summary"
 if [ "$FAILURES" -eq 0 ]; then

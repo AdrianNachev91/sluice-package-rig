@@ -29,6 +29,13 @@ on:
         description: What `sluice --version` has to print, after the word Sluice
         required: true
         default: 0.1.0
+      # Left empty for an ordinary verification run. Filled in, the run installs the release named
+      # above and then asks whether it replaces itself with whatever the Latest release serves,
+      # which is the update channel end to end.
+      update_to_version:
+        description: The version the installed copy should move to, or empty to skip the update check
+        required: false
+        default: ''
       # While one machine is being fixed, only that machine is worth running. Each installs through
       # a different mechanism and fails for its own reasons, so a full run mostly re-proves what
       # already worked and buries the answer being waited on.
@@ -151,4 +158,4 @@ jobs:
       - name: Install, launch and report
         run: |
           chmod +x smoke-test.sh
-          ./smoke-test.sh "${{ matrix.machine }}" package "${{ inputs.expected_version }}" "$PWD/example.heic"
+          ./smoke-test.sh "${{ matrix.machine }}" package "${{ inputs.expected_version }}" "$PWD/example.heic" "${{ inputs.update_to_version }}"

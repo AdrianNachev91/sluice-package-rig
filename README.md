@@ -46,6 +46,31 @@ update channel runs through. Linux installs the deb.
 Every check runs and the failures are counted, rather than the first one ending the job. A macOS
 run takes long enough that answering one question per dispatch is its own cost.
 
+## Verifying that an installed copy updates itself
+
+Naming `update_to_version` as well turns the same run into the update check. It installs the
+release named in `release_tag`, launches it, and then asks the operating system what version is
+installed until the answer moves or ten minutes pass.
+
+```
+gh workflow run verify-package.yml --repo AdrianNachev91/sluice-package-rig --ref main \
+  -f release_tag=0.1.1 -f expected_version=0.1.0 -f update_to_version=0.1.2 \
+  -f machines=mac.aarch64
+```
+
+It needs two releases: an older one to install, and a newer one holding the Latest label, which is
+the feed every installed copy reads. Windows and macOS are the two that have one. A deb updates
+through an apt repository instead, and no release here carries one. So naming a version to move to
+on Linux is reported as a question this rig cannot answer.
+
+The version is read back from the machine rather than from `sluice --version`. That one comes from
+the jar's manifest, and a pair of packages built from one jar answers the same in both.
+
+The pair under test is built with `-Kapp.updates=aggressive`, which checks on every start. What
+ships is Conveyor's default, where Windows leaves the check to an operating system task that runs
+every eight hours. So this proves that an installed copy reads the feed, finds a newer version and
+replaces itself. It proves nothing about when a user's own machine would decide to.
+
 ## Releases in this repository
 
 Two unrelated things are released here, and only one of them may carry GitHub's Latest label.
