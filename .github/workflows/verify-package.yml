@@ -65,6 +65,13 @@ jobs:
           # of what the decoder build wants. That one picks an image to set the glibc floor a user
           # needs. This one asks whether the package installs on a machine somebody might own.
           #
+          # linux.aarch64 has no "latest" alias to pick up that same newest-image intent
+          # automatically, so it is pinned by hand to whatever ubuntu-latest itself currently
+          # resolves to. A pin one generation behind fails on nothing about the package: Conveyor's
+          # deb depends on Ubuntu's "t64" library names, which exist from noble on but not on the
+          # generation before it, so mismatching the two jobs' Ubuntu release reads as an arm64
+          # packaging defect when it is really just one job on an older image than its sibling.
+          #
           # mac.amd64 is macos-15-intel because macos-13 was retired on 2025-12-04, and a job
           # asking for a retired label queues against a name that does not exist. It never starts
           # and never fails, so the run simply never finishes, which reads as a busy runner.
@@ -80,7 +87,7 @@ jobs:
           # somewhere a shell may read them.
           machines = [
               {"machine": "linux.amd64",   "runs-on": "ubuntu-latest",    "assets": "sluice_*_amd64.deb"},
-              {"machine": "linux.aarch64", "runs-on": "ubuntu-22.04-arm", "assets": "sluice_*_arm64.deb"},
+              {"machine": "linux.aarch64", "runs-on": "ubuntu-24.04-arm", "assets": "sluice_*_arm64.deb"},
               {"machine": "mac.amd64",     "runs-on": "macos-15-intel",   "assets": "sluice-*-mac-amd64.zip"},
               {"machine": "mac.aarch64",   "runs-on": "macos-latest",     "assets": "sluice-*-mac-aarch64.zip"},
               {"machine": "windows.amd64", "runs-on": "windows-latest",   "assets": "sluice-*.x64.msix sluice-*-windows-amd64.zip"},
