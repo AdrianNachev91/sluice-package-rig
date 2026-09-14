@@ -50,7 +50,7 @@ run takes long enough that answering one question per dispatch is its own cost.
 
 Naming `update_to_version` as well turns the same run into the update check. It installs the
 release named in `release_tag`, launches it, and then asks the operating system what version is
-installed until the answer moves or ten minutes pass.
+installed until the answer moves. It gives up about twelve minutes in.
 
 ```
 gh workflow run verify-package.yml --repo AdrianNachev91/sluice-package-rig --ref main \
@@ -66,10 +66,11 @@ on Linux is reported as a question this rig cannot answer.
 The version is read back from the machine rather than from `sluice --version`. That one comes from
 the jar's manifest, and a pair of packages built from one jar answers the same in both.
 
-The pair under test is built with `-Kapp.updates=aggressive`, which checks on every start. What
-ships is Conveyor's default, where Windows leaves the check to an operating system task that runs
-every eight hours. So this proves that an installed copy reads the feed, finds a newer version and
-replaces itself. It proves nothing about when a user's own machine would decide to.
+The pair under test is built with `-Kapp.updates=aggressive`, which Conveyor documents as checking
+on each start. What ships is its default, where Windows leaves the check to an operating system
+task that runs every eight hours. So this proves that an installed copy reads the feed, finds a
+newer version and replaces itself. It proves nothing about when a user's own machine would decide
+to.
 
 ## Releases in this repository
 
@@ -78,6 +79,10 @@ Two unrelated things are released here, and only one of them may carry GitHub's 
 Sluice's own packages are built and signed elsewhere and published here as `sluice-<version>`.
 Every URL baked into them resolves through `releases/latest/download`, so the Latest release is
 what an installed copy reads as its update feed.
+
+The pair used for the update check is tagged with the bare version instead, `0.1.1` and `0.1.2`.
+Conveyor derives the tag it looks for from the version alone, so a package that is meant to serve
+updates has to sit under that name.
 
 The decoder archives are published as `libheif-<version>` with that label explicitly refused. A
 decoder release holding the label would leave every installed copy reading an update feed with no

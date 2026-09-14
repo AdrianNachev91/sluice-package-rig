@@ -22,8 +22,7 @@ MACHINE="${1:?machine}"
 PKGDIR="$(cd "${2:?package directory}" && pwd)"
 EXPECTED_VERSION="${3:?expected version}"
 HEIC="${4:?heic fixture}"
-# Empty unless this run is asking whether the installed copy replaces itself. Naming a version
-# rather than a flag, because the assertion is what the machine reports afterwards.
+# Empty unless this run is asking whether the installed copy replaces itself.
 UPDATE_TO_VERSION="${5:-}"
 
 FAILURES=0
@@ -42,6 +41,19 @@ pass() {
 section() {
   echo
   echo "=== $* ==="
+}
+
+# What the operating system says is installed, which is the only reading that can move here. The
+# two packages under test are built from one jar, so `sluice --version` reads its manifest and
+# answers the same in both.
+installed_version() {
+  case "$MACHINE" in
+    mac.*)     plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" ;;
+    # No ToString on the end. An absent package leaves the property null, and calling a method on
+    # null is an error rather than an empty answer, which would read as a version nobody can parse
+    # instead of as a package that is not installed.
+    windows.*) powershell -NoProfile -Command "(Get-AppxPackage Sluice -ErrorAction SilentlyContinue).Version" | tr -d '\r' ;;
+  esac
 }
 
 # Runs a command, prints both streams, and holds the caller to the exit code AND to an empty error
@@ -107,14 +119,15 @@ case "$MACHINE" in
     # bundle in place when it updates. Unpacking under sudo leaves it owned by root, which is a
     # state no user's machine is in, and which the updater can only write to by asking for
     # credentials nothing here can answer.
-    sudo chown -R "$(id -u):$(id -g)" "$APP"
+    sudo chown -R "$(id -u):$(id -g)" "$APP" \
+      || fail "could not take ownership of $APP, so an update would have to ask for credentials nothing here can answer"
 
     CLI="$APP/Contents/MacOS/sluice"
     GUI_LAUNCH=(open -a "$APP")
     # The window launcher's own binary, not the bundle. Sparkle's updater runs from inside the same
     # bundle, so a pattern naming the bundle finds the process installing an update and reads it as
     # the app being up. Stopping the app by that pattern kills the installer along with it.
-    GUI_MATCH="$APP/Contents/MacOS/SluiceDesktop"
+    GUI_MATCH="Contents/MacOS/SluiceDesktop"
     ;;
 
   windows.amd64)
@@ -172,6 +185,15 @@ case "$MACHINE" in
     exit 1
     ;;
 esac
+
+# Taken here, before the first launch, because a launch is what triggers an update check. Read after
+# one and a package that updated on the spot is indistinguishable from a release tag naming the new
+# version by mistake, which is what the update section refuses on.
+INSTALLED_BEFORE=""
+if [ -n "$UPDATE_TO_VERSION" ]; then
+  INSTALLED_BEFORE="$(installed_version 2>/dev/null || true)"
+  echo "the machine reports the freshly installed copy as: ${INSTALLED_BEFORE:-nothing readable}"
+fi
 
 # ---------------------------------------------------------------------------------------------
 # What the operating system makes of the signature
@@ -291,9 +313,8 @@ gui_stop() {
   esac
 }
 
-# Launches, waits, and answers whether it was still there. Alive after this long counts as
-# launched: a JavaFX startup failure exits in under a second, and the toolkit needs a few to put a
-# window up on a cold machine.
+# Alive after the wait counts as launched: a JavaFX startup failure exits in under a second, and
+# the toolkit needs a few to put a window up on a cold machine.
 launch_and_settle() {
   local seconds="$1"
   "${GUI_LAUNCH[@]}" &
@@ -317,25 +338,13 @@ fi
 # ---------------------------------------------------------------------------------------------
 # Update in place
 #
-# Runs only when a fifth argument names the version this install is meant to move to. The feed it
-# reads is whichever release in this repository carries GitHub's Latest label, because that is what
-# every URL baked into the package resolves through.
+# The feed an installed copy reads is whichever release in this repository carries GitHub's Latest
+# label, because that is what every URL baked into the package resolves through.
 #
-# The version is read back off the operating system rather than out of `sluice --version`. That one
-# comes from the jar's manifest, which Maven fills from the pom, and the rig's pair of packages
-# differ only in the version Conveyor was given on the command line. So the jar answers the same in
-# both and could never show a move.
+# The reading it compares was taken in the install section, before anything launched. Launching is
+# itself the trigger, so a reading taken here could already be the new version, and the run would
+# report a package that never moved.
 # ---------------------------------------------------------------------------------------------
-installed_version() {
-  case "$MACHINE" in
-    mac.*)     plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist" ;;
-    # No ToString on the end. An absent package leaves the property null, and calling a method on
-    # null is an error rather than an empty answer, which would read as a version nobody can parse
-    # instead of as a package that is not installed.
-    windows.*) powershell -NoProfile -Command "(Get-AppxPackage Sluice -ErrorAction SilentlyContinue).Version" | tr -d '\r' ;;
-  esac
-}
-
 if [ -n "$UPDATE_TO_VERSION" ]; then
   section "update in place"
 
@@ -357,22 +366,28 @@ if [ -n "$UPDATE_TO_VERSION" ]; then
   esac
 
   if [ -n "$OS_EXPECTED" ]; then
-    BEFORE="$(installed_version 2>/dev/null || true)"
-    echo "the machine reports the installed copy as: ${BEFORE:-nothing readable}"
+    BEFORE="$INSTALLED_BEFORE"
 
     if [ -z "$BEFORE" ]; then
       fail "could not read the installed version, so there is nothing to compare an update against"
     elif [ "$BEFORE" = "$OS_EXPECTED" ]; then
       # Without this the run passes on a release that was already the new one, which is the shape
       # a mistyped release tag takes.
-      fail "the installed copy already reports $BEFORE, so this run could not tell an update from a package that never moved"
+      fail "the package installed as $BEFORE, which is the version it was meant to move to, so this run could not tell an update from a release tag naming the wrong half of the pair"
     else
-      # Both platforms check on startup, so each cycle is one launch. Sparkle downloads while the
-      # app runs and swaps the bundle once it exits, and App Installer hands the work to the
-      # operating system, so the reading is taken after the app is gone rather than while it runs.
+      # The window launcher section above has already launched and quit once, which is this check's
+      # first trigger. Each cycle here is another, and the reading is taken after the app is gone,
+      # since Sparkle swaps the bundle once it exits and App Installer hands the work to the
+      # operating system.
       #
-      # Two minutes a cycle because the download is 83 MB. Cut short, Sparkle starts it again on the
-      # next launch, so a cycle too brief to finish spends the whole deadline getting nowhere.
+      # How many of these launches actually reach the network is not established. On Windows
+      # updatecheck.exe is the entry point and runs every time. On macOS Sparkle carries an
+      # SUScheduledCheckInterval of 3600. Whether each launch checks there, or only the first one
+      # within an hour, depends on what aggressive mode sets inside Conveyor's own launcher. That
+      # is not readable from the artifacts.
+      #
+      # Two minutes a cycle because the download is 83 MB, and a cycle too brief to finish spends
+      # the deadline getting nowhere.
       DEADLINE=$((SECONDS + 600))
       AFTER="$BEFORE"
       while [ "$SECONDS" -lt "$DEADLINE" ]; do
@@ -380,11 +395,14 @@ if [ -n "$UPDATE_TO_VERSION" ]; then
         sleep 20
         AFTER="$(installed_version 2>/dev/null || true)"
         echo "the machine now reports: ${AFTER:-nothing readable}"
-        [ "$AFTER" = "$OS_EXPECTED" ] && break
+        # Anything other than the version it started on ends the wait. Holding out for the expected
+        # one would burn the rest of the deadline relaunching a copy that has already updated, and
+        # would then report it as never having moved.
+        [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ] && break
       done
 
       if [ "$AFTER" = "$OS_EXPECTED" ]; then
-        pass "the installed copy read the feed and replaced itself: $BEFORE became $AFTER"
+        pass "the installed copy replaced itself: $BEFORE became $AFTER"
         # Replacing the files and running afterwards are different claims. An update that leaves a
         # bundle the operating system will not start is the failure a version number cannot show.
         if launch_and_settle 20; then
@@ -392,6 +410,8 @@ if [ -n "$UPDATE_TO_VERSION" ]; then
         else
           fail "the replaced copy would not stay running, so the update left the app unstartable"
         fi
+      elif [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ]; then
+        fail "the installed copy replaced itself with $AFTER rather than $OS_EXPECTED, so the update applied and served something other than the version this run named"
       else
         fail "the installed copy still reports \"${AFTER:-nothing readable}\" rather than $OS_EXPECTED, so the update did not apply"
       fi
