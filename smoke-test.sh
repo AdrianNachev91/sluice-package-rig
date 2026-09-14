@@ -182,8 +182,14 @@ case "$MACHINE" in
     fi
     ;;
 
-  linux.amd64)
-    DEB="$(find "$PKGDIR" -name "sluice_*_amd64.deb" -print -quit)"
+  linux.amd64|linux.aarch64)
+    # Debian's own arch names, which is not the same spelling Conveyor's machine name uses for the
+    # 64-bit ARM case: arm64 on the filename, aarch64 in $MACHINE.
+    case "$MACHINE" in
+      linux.amd64)   DEB_ARCH=amd64 ;;
+      linux.aarch64) DEB_ARCH=arm64 ;;
+    esac
+    DEB="$(find "$PKGDIR" -name "sluice_*_${DEB_ARCH}.deb" -print -quit)"
     [ -n "$DEB" ] || { fail "no deb in $PKGDIR"; exit 1; }
     sudo apt-get update
     sudo apt-get install -y "$DEB" || fail "apt refused the package"
