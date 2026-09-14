@@ -87,11 +87,16 @@ jobs:
           WANTED: ${{ inputs.machines }}
         run: |
           set -euo pipefail
-          # linux.amd64 is the one image deliberately not on its latest label, and it is not a
-          # stale pin. Every library in the archive is at its current release. What the image
-          # decides is the glibc a user needs to start the binary at all, which is a floor rather
-          # than a version: built on 24.04 it wants 2.39, which Debian 12, Ubuntu 22.04 and RHEL 9
-          # do not have. Built here it wants 2.35 and runs on those and on the newer ones.
+          # linux.amd64 and linux.aarch64 are the two images deliberately not on their latest
+          # label, and it is not a stale pin. Every library in the archive is at its current
+          # release. What the image decides is the glibc a user needs to start the binary at all,
+          # which is a floor rather than a version: built on 24.04 it wants 2.39, which Debian 12,
+          # Ubuntu 22.04 and RHEL 9 do not have. Built here it wants 2.35 and runs on those and on
+          # the newer ones.
+          #
+          # ubuntu-22.04-arm rather than a self-hosted or emulated builder: GitHub's arm64 hosted
+          # runners are free on a public repository, generally available since 2025-08-07, so the
+          # fourth machine costs nothing to build natively.
           #
           # mac.amd64 is macos-15-intel because macos-13 was retired on 2025-12-04, and a job
           # asking for a retired label queues against a name that does not exist. It never starts
@@ -104,10 +109,11 @@ jobs:
           import json, os, sys
 
           machines = [
-              {"machine": "linux.amd64",   "runs-on": "ubuntu-22.04",   "archive": "tar.gz", "deployment_target": ""},
-              {"machine": "mac.amd64",     "runs-on": "macos-15-intel", "archive": "tar.gz", "deployment_target": "11.0"},
-              {"machine": "mac.aarch64",   "runs-on": "macos-latest",   "archive": "tar.gz", "deployment_target": "11.0"},
-              {"machine": "windows.amd64", "runs-on": "windows-latest", "archive": "zip",    "deployment_target": ""},
+              {"machine": "linux.amd64",   "runs-on": "ubuntu-22.04",     "archive": "tar.gz", "deployment_target": ""},
+              {"machine": "linux.aarch64", "runs-on": "ubuntu-22.04-arm", "archive": "tar.gz", "deployment_target": ""},
+              {"machine": "mac.amd64",     "runs-on": "macos-15-intel",   "archive": "tar.gz", "deployment_target": "11.0"},
+              {"machine": "mac.aarch64",   "runs-on": "macos-latest",     "archive": "tar.gz", "deployment_target": "11.0"},
+              {"machine": "windows.amd64", "runs-on": "windows-latest",   "archive": "zip",    "deployment_target": ""},
           ]
 
           wanted = os.environ["WANTED"].strip()
@@ -158,10 +164,10 @@ jobs:
         run: pip install meson ninja
 
       # dav1d assembles its x86 paths with nasm and no runner image carries it. Without it meson
-      # stops at "Program 'nasm' not found" rather than falling back to C. Apple silicon assembles
-      # its own aarch64 paths with the system toolchain and wants nothing extra.
+      # stops at "Program 'nasm' not found" rather than falling back to C. Every aarch64 machine
+      # assembles its own paths with the system toolchain and wants nothing extra.
       - name: Install nasm
-        if: ${{ matrix.machine != 'mac.aarch64' }}
+        if: ${{ !endsWith(matrix.machine, '.aarch64') }}
         run: |
           set -euo pipefail
           case "${{ matrix.machine }}" in
@@ -228,11 +234,12 @@ jobs:
           esac
           # An rpath is where the tool looks when it RUNS. The linker needs telling separately, and
           # GNU ld says so itself: "libdav1d.so.7, needed by libheif.so, not found (try using
-          # -rpath or -rpath-link)". Nothing else needs it. Apple's linker records each library's
-          # own install name, and Windows resolves by DLL name at load time.
-          if [ "${{ matrix.machine }}" = "linux.amd64" ]; then
-            echo "LDFLAGS=-Wl,-rpath-link,$PWD/stage/lib" >> "$GITHUB_ENV"
-          fi
+          # -rpath or -rpath-link)". That is GNU ld's own behaviour, not an amd64 one, so both
+          # Linux legs need it. Apple's linker records each library's own install name, and Windows
+          # resolves by DLL name at load time.
+          case "${{ matrix.machine }}" in
+            linux.*) echo "LDFLAGS=-Wl,-rpath-link,$PWD/stage/lib" >> "$GITHUB_ENV" ;;
+          esac
 
       # Left alone, a macOS build's Mach-O headers record the runner's own OS as the floor, not a
       # chosen one. macos-latest moved to 26 the day this bit: the Apple Silicon archive refused to
@@ -499,7 +506,15 @@ jobs:
           set -euo pipefail
           case "${{ matrix.machine }}" in
             linux.*)
-              SYSTEM="libc.so.6 libm.so.6 libdl.so.2 librt.so.1 libpthread.so.0 libstdc++.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2"
+              # The dynamic linker's own name is architecture-specific and the rest of the
+              # allowlist is not: amd64's ld.so answers to ld-linux-x86-64.so.2, aarch64's to
+              # ld-linux-aarch64.so.1. The wrong one here reads as a dependency the archive is
+              # missing, when it is a name the operating system was never going to carry.
+              case "${{ matrix.machine }}" in
+                linux.amd64)   LOADER=ld-linux-x86-64.so.2 ;;
+                linux.aarch64) LOADER=ld-linux-aarch64.so.1 ;;
+              esac
+              SYSTEM="libc.so.6 libm.so.6 libdl.so.2 librt.so.1 libpthread.so.0 libstdc++.so.6 libgcc_s.so.1 $LOADER"
               BAD=0
               for f in "$STAGE"/bin/* "$STAGE"/lib/*.so*; do
                 [ -L "$f" ] && continue
